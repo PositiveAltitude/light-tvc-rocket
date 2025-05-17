@@ -1,0 +1,8 @@
+[package]
+name = "light-tvc-rocket-visualization"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+bevy = "0.12.1"
+light-tvc-rocket-simulation = { path = "../simulation" }
