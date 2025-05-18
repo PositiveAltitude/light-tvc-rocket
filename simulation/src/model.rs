@@ -7,21 +7,17 @@ pub struct RocketState {
     pub velocity: Vec3,
     pub acceleration: Vec3,
     pub rotation: Quat,
-    pub angular_velocity: Quat,
+    pub angular_velocity: Vec3,
 }
-
-// pub struct SimulationState {
-//     pub rocket_states: RocketState,
-//     pub tvc_angle: Vec2,
-//     pub tvc_velocity: Vec2,
-// }
 
 pub struct RocketParameters {
     pub mass: f32,
     pub moment_of_inertia: Vec3,
     pub thrust: f32,
     pub thrust_duration: f32,
-
+    pub max_tvc_angle: f32,
+    pub motor_com_offset:Vec3,
+    pub tvc_misalignment: Vec2,
 }
 pub struct Environment {
     pub g: f32,
@@ -34,7 +30,7 @@ pub struct Environment {
 pub struct SensorData {
     pub time: f32,
     pub acc: Vec3,
-    pub gyr: Quat,
+    pub gyr: Vec3,
     pub barometric_height: f32,
 }
 

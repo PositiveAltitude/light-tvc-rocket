@@ -1,3 +1,3 @@
-mod model;
-mod simulation;
-mod control_system;
+pub mod model;
+pub mod simulation;
+pub mod control_system;

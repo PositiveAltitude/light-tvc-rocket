@@ -2,7 +2,9 @@ use crate::model::{
     ControlInputs, ControlSystem, Environment, RocketParameters, RocketState, SensorData,
     Simulation, SimulationLog,
 };
-use bevy::math::Vec3;
+use bevy::math::{Quat, Vec3};
+use bevy::prelude::Transform;
+use std::ops::{Mul, MulAssign};
 
 pub struct NumericalSimulation {}
 
@@ -49,28 +51,71 @@ impl Simulation for NumericalSimulation {
     fn make_step(
         &mut self,
         state: &mut RocketState,
-        control_inputs: &ControlInputs,
-        rocket_parameters: &RocketParameters,
-        environment: &Environment,
+        ci: &ControlInputs,
+        rp: &RocketParameters,
+        env: &Environment,
     ) {
-        let mg = Vec3::new(0.0, 0.0, -environment.g * rocket_parameters.mass);
-        let thrust_value = if rocket_parameters.thrust_duration > state.time {
-            rocket_parameters.thrust
+        let mg = Vec3::new(0.0, 0.0, -env.g * rp.mass);
+        let thrust_value = if rp.thrust_duration > state.time {
+            rp.thrust
         } else {
             0.0
         };
-        let thrust = Vec3::new(0.0, 0.0, thrust_value);
-        
-        let total_force = mg + thrust;
-        let a = total_force / rocket_parameters.mass;
-        
-        state.time += environment.dt;
-        
+
+        let mut tvc_rotation = Quat::from_axis_angle(
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            -(ci.tvc.x * rp.max_tvc_angle + rp.tvc_misalignment.x),
+        ) * Quat::from_axis_angle(
+            Vec3 {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+            -(ci.tvc.y * rp.max_tvc_angle + rp.tvc_misalignment.y),
+        );
+
+        let thrust = tvc_rotation * Vec3::new(0.0, 0.0, thrust_value);
+
+        let total_force = mg + state.rotation * thrust;
+        let a = total_force / rp.mass;
+
+        state.time += env.dt;
+
         state.acceleration = a;
-        state.velocity += a * environment.dt;
-        state.position += state.velocity * environment.dt;
-        
-        //TODO: orientation change
-        //TODO: 
+        state.velocity += a * env.dt;
+        state.position += state.velocity * env.dt;
+
+        let moment = rp.motor_com_offset.cross(thrust);
+
+        fn d_omega(w: &Vec3, i: &Vec3, m: &Vec3) -> Vec3 {
+            Vec3::new(
+                ((i.y - i.z) * w.y * w.z + m.x) / i.x,
+                ((i.z - i.x) * w.z * w.x + m.y) / i.y,
+                ((i.x - i.y) * w.x * w.y + m.z) / i.z,
+            )
+        }
+
+        let d_omega_rk2_step1 = d_omega(&state.angular_velocity, &rp.moment_of_inertia, &moment);
+        let d_omega_rk2_step2 = state.angular_velocity + d_omega_rk2_step1 * env.dt / 2.0;
+        let d_omega_rk2_step3 = d_omega(&d_omega_rk2_step2, &rp.moment_of_inertia, &moment);
+
+        state.angular_velocity += d_omega_rk2_step3 * env.dt;
+
+        let dq = state.rotation
+            * Quat::from_xyzw(
+                state.angular_velocity.x,
+                state.angular_velocity.y,
+                state.angular_velocity.z,
+                0.0,
+            )
+            * (env.dt / 2.0);
+        state.rotation = (state.rotation + dq).normalize();
+
+        //TODO: Euler equations
+        //TODO:
     }
 }
