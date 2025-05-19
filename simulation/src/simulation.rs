@@ -62,6 +62,21 @@ impl Simulation for NumericalSimulation {
             0.0
         };
 
+        state.tvc_delay_deque.push_back((*ci).clone());
+        let ci = if state.tvc_delay_deque.len() > rp.tvc_delay as usize {
+            state.tvc_delay_deque.pop_front().unwrap()
+        } else {
+            ControlInputs {
+                tvc: Default::default(),
+                ignition: false,
+                parachute: false,
+            }
+        };
+
+        let max_tvc_movement = env.dt * rp.max_tvc_turn_rate;
+        state.tvc.x += (ci.tvc.y - state.tvc.x).clamp(-max_tvc_movement, max_tvc_movement);
+        state.tvc.y += (ci.tvc.y - state.tvc.y).clamp(-max_tvc_movement, max_tvc_movement);
+
         let mut tvc_rotation = Quat::from_axis_angle(
             Vec3 {
                 x: 1.0,

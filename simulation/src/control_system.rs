@@ -57,8 +57,6 @@ impl ControlSystem for PIDControlSystem {
         self.i_integral.y += deviation.x * dt;
         let yi = self.i_integral.y * self.i_gain;
         let y = (yp + yd + yi).clamp(-1.0, 1.0);
-        
-        println!("{}", self.i_integral.y);
 
         ControlInputs {
             tvc: Vec2::new(x, y),

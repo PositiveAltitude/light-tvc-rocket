@@ -1,3 +1,5 @@
+use std::thread;
+use std::time::Instant;
 use crate::simmulation_instance::run_simulation;
 use crate::visual_objects::{Rocket3DObject, spawn_all_entities};
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -23,9 +25,25 @@ pub struct Trajectory {
 }
 
 fn main() {
+    let start = Instant::now();
     println!("Starting simulation");
     let mut simulation_result = run_simulation();
-    println!("Simulation done");
+
+    // let handles = (0..99)
+    //     .map(|i| thread::spawn(move || {
+    //         for i in 0..998 {
+    //             let _ = run_simulation();
+    //         };
+    //         1u8
+    //     }
+    //     ))
+    //     .collect::<Vec<_>>();
+    // 
+    // for h in handles {
+    //     h.join().unwrap();
+    // }
+    
+    println!("Simulation done, elapsed: {}", start.elapsed().as_secs_f32());
 
     simulation_result.sort_by(|a, b| b.time.total_cmp(&a.time));
 
@@ -110,7 +128,7 @@ pub fn update(
     let mut last_state = None;
 
     while !simulation_result.simulation_result.is_empty()
-        && simulation_result.simulation_result.last().unwrap().time < time.elapsed_seconds()
+        && simulation_result.simulation_result.last().unwrap().time < (time.elapsed_seconds() - 1.0)
     {
         last_state = simulation_result.simulation_result.pop();
     }
