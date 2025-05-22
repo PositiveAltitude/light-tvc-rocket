@@ -1,6 +1,6 @@
 use std::thread;
 use std::time::Instant;
-use crate::simmulation_instance::run_simulation;
+use crate::simmulation_instance::{run_nn, run_simulation};
 use crate::visual_objects::{Rocket3DObject, spawn_all_entities};
 use bevy::core_pipeline::bloom::BloomSettings;
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -25,9 +25,9 @@ pub struct Trajectory {
 }
 
 fn main() {
-    let start = Instant::now();
-    println!("Starting simulation");
-    let mut simulation_result = run_simulation();
+    // let start = Instant::now();
+    // println!("Starting simulation");
+    // let mut simulation_result = run_simulation();
 
     // let handles = (0..99)
     //     .map(|i| thread::spawn(move || {
@@ -43,20 +43,23 @@ fn main() {
     //     h.join().unwrap();
     // }
     
-    println!("Simulation done, elapsed: {}", start.elapsed().as_secs_f32());
-
-    simulation_result.sort_by(|a, b| b.time.total_cmp(&a.time));
-
-    App::new()
-        .insert_resource(Msaa::Sample8)
-        .insert_resource(SimulationResult { simulation_result })
-        .insert_resource(Trajectory { points: vec![] })
-        .insert_resource(DirectionalLightShadowMap { size: 4096 })
-        .add_plugins(DefaultPlugins)
-        .add_systems(Startup, setup)
-        .add_systems(Update, update)
-        .add_systems(Update, camera_orbit)
-        .run();
+    // println!("Simulation done, elapsed: {}", start.elapsed().as_secs_f32());
+    // 
+    // simulation_result.sort_by(|a, b| b.time.total_cmp(&a.time));
+    // 
+    // App::new()
+    //     .insert_resource(Msaa::Sample8)
+    //     .insert_resource(SimulationResult { simulation_result })
+    //     .insert_resource(Trajectory { points: vec![] })
+    //     .insert_resource(DirectionalLightShadowMap { size: 4096 })
+    //     .add_plugins(DefaultPlugins)
+    //     .add_systems(Startup, setup)
+    //     .add_systems(Update, update)
+    //     .add_systems(Update, camera_orbit)
+    //     .run();
+    
+    run_nn();
+    
 }
 
 fn setup(

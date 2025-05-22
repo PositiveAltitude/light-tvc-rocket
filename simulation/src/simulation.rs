@@ -15,6 +15,7 @@ impl Simulation for NumericalSimulation {
         rp: &RocketParameters,
         initial_state: &RocketState,
         control_system: &mut dyn ControlSystem,
+        stop_of_failure: bool,
     ) -> Vec<SimulationLog> {
         let mut current_state = (*initial_state).clone();
         current_state.time = 0.0;
@@ -29,12 +30,19 @@ impl Simulation for NumericalSimulation {
             barometric_height: 0.0,
         };
 
+        let up = Vec3::new(0.0, 0.0, 1.0);
+
         while current_state.time < environment.max_time {
             ans.push(SimulationLog {
                 time: current_state.time,
                 position: current_state.position,
                 rotation: current_state.rotation,
             });
+
+            if stop_of_failure && (current_state.rotation * up).z < 0.5 {
+                break;
+            };
+
             let control_inputs = control_system.update(&sensor_data);
             for i in 0..environment.simulation_substeps {
                 self.make_step(&mut current_state, &control_inputs, rp, environment);

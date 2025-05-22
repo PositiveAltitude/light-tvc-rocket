@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 bevy = "0.12.1"
 light-tvc-rocket-simulation = { path = "../simulation" }
+rand = "0.9.1"
+rand_distr = "0.5.1"
+ordered-float = "5.0.0"

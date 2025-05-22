@@ -38,6 +38,8 @@ pub struct RocketParameters {
     pub max_tvc_turn_rate: f32,
     pub tvc_delay: u8,
 }
+
+#[derive(Clone)]
 pub struct Environment {
     pub g: f32,
     pub wind: Vec3,
@@ -78,6 +80,7 @@ pub trait Simulation {
         rp: &RocketParameters,
         initial_state: &RocketState,
         control_system: &mut dyn ControlSystem,
+        stop_of_failure: bool,
     ) -> Vec<SimulationLog>;
     fn make_step(
         &mut self,
