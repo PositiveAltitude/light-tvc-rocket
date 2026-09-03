@@ -42,15 +42,18 @@ jobs:
   embedded:
     name: Embedded (lint and compile)
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     defaults:
       run:
         working-directory: light-robot-core-embedded
     steps:
       - uses: actions/checkout@v4
-      - uses: esp-rs/espup-action@v1
+      - name: Install Rust for Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.5
         with:
-          toolchain: esp
-          targets: xtensa-esp32s3-espidf
+          default: true
+          buildtargets: esp32s3
           ldproxy: true
       - run: cargo fmt --check
       - run: cargo clippy --target xtensa-esp32s3-espidf -- -D warnings
