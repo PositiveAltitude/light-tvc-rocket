@@ -1,4 +1,5 @@
 # Project exclude paths
+/.omx/
 /light-robot-core-embedded/target/
 /light-robot-core-frontend/target/
 /light-robot-core-simulation/target/
