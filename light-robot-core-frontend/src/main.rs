@@ -1,25 +1,17 @@
 mod components;
 
 use crate::components::*;
-use std::any::Any;
-
 use light_robot_core_api::*;
-use std::process::Child;
 
 use gloo::console::log;
-use material_yew::text_inputs::TextFieldType;
 use material_yew::*;
 use reqwasm::http::Request;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 use yew_hooks::prelude::*;
 
 use gloo::timers::callback::Timeout;
-use wasm_bindgen::JsCast;
-use web_sys::console::log;
-use web_sys::{console, HtmlInputElement};
 
 #[derive(Properties, PartialEq)]
 struct RestButtonProps {
@@ -46,7 +38,6 @@ fn RestButton(props: &RestButtonProps) -> Html {
                 .await
                 .unwrap();
         });
-        ()
     });
 
     let pointerup_command = props.pointerup_command.clone();
@@ -63,7 +54,6 @@ fn RestButton(props: &RestButtonProps) -> Html {
                     .await
                     .unwrap();
             });
-            ()
         }
     };
 
@@ -72,11 +62,11 @@ fn RestButton(props: &RestButtonProps) -> Html {
     html! {<span class={if props.equal_size {"equal-size"} else {""}} {onpointerdown}{onpointerup}><MatButton label={text} outlined=true/></span>}
 }
 
-static command_uri: &str = "http://lrc.local/command";
+static COMMAND_URI: &str = "http://lrc.local/command";
 
 fn send_command(command: Command) {
     spawn_local(async move {
-        Request::post(command_uri)
+        Request::post(COMMAND_URI)
             .body(serde_json::to_string(&command).unwrap())
             .send()
             .await
@@ -86,8 +76,8 @@ fn send_command(command: Command) {
 
 #[function_component]
 fn WifiSettings() -> Html {
-    let ssid = use_state(|| String::new());
-    let password = use_state(|| String::new());
+    let ssid = use_state(String::new);
+    let password = use_state(String::new);
 
     let ssid1 = ssid.clone();
     let password1 = password.clone();
@@ -155,7 +145,7 @@ fn App() -> Html {
 
 #[function_component]
 fn StateComponent() -> Html {
-    let state = use_state_eq(|| State::default());
+    let state = use_state_eq(State::default);
     let update_required = use_state_eq(|| true);
 
     async fn fetch_state() -> Result<State, Error> {
@@ -180,16 +170,15 @@ fn StateComponent() -> Html {
 
     let async_request: UseAsyncHandle<State, Error> = use_async(async move {
         let ans = fetch_state().await;
-        let ans2 = ans.clone();
-        if ans.is_ok() {
-            state2.set(ans.unwrap())
-        };
+        if let Ok(next_state) = &ans {
+            state2.set(next_state.clone());
+        }
         Timeout::new(1000, move || {
             log!("request");
             u3.set(true);
         })
         .forget();
-        ans2
+        ans
     });
 
     let u2 = update_required.clone();
@@ -209,27 +198,6 @@ fn StateComponent() -> Html {
         x if x > 0.90 => "battery_full",
         _ => "battery_unknown",
     };
-
-    fn pyro_status(pyro: &PyroChannelState) -> &'static str {
-        match pyro {
-            PyroChannelState {
-                fire: true,
-                test_voltage: _,
-            } => "active!!!",
-            PyroChannelState {
-                fire: false,
-                test_voltage: tv,
-            } if *tv > 1.0f32 => "connected",
-            _ => "not connected",
-        }
-    }
-
-    fn servo_state(servo: &Option<f32>) -> String {
-        match servo {
-            None => String::from("off"),
-            Some(a) => format!("{:.4}", a),
-        }
-    }
 
     html! {
         <div class="state">
