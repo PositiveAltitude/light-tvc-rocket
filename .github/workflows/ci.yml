@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: API (lint and compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: light-robot-core-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo check --all-targets --locked
+
+  frontend:
+    name: Frontend (lint and compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: light-robot-core-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo check --target wasm32-unknown-unknown --locked
+
+  embedded:
+    name: Embedded (lint and compile)
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        working-directory: light-robot-core-embedded
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust for Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+      - run: cargo fmt --check
+      - run: cargo clippy --target xtensa-esp32s3-espidf -- -D warnings
+      - run: cargo check --target xtensa-esp32s3-espidf --locked

@@ -40,14 +40,11 @@ pub struct WifiConnectionConfiguration {
     pub credentials: WifiCredentials,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
 pub enum WifiConnectionType {
     ConnectToExternal,
+    #[default]
     StartAccessPoint,
-}
-
-impl Default for WifiConnectionType {
-    fn default() -> Self { WifiConnectionType::StartAccessPoint }
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -71,7 +68,7 @@ pub struct BarometerState {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServoCommand {
     Disable,
-    Update { servo1: f32, servo2: f32}
+    Update { servo1: f32, servo2: f32 },
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -80,8 +77,8 @@ pub enum Command {
     SetWifi { ssid: String, password: String },
     ResetNvs,
     SetLedColor { r: u8, g: u8, b: u8 },
-    ServoCommand {command: ServoCommand },
-    TestServo {servo_id: u8, start: f32, end: f32},
+    ServoCommand { command: ServoCommand },
+    TestServo { servo_id: u8, start: f32, end: f32 },
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
