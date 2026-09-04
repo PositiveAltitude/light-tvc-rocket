@@ -23,3 +23,11 @@ between `light-robot-core-embedded/src/servo_api.rs` here and
 This is experimental hardware-control software. Treat motor and pyro behavior
 as safety-critical, and do not assume code paths are safe to exercise on
 energized hardware without explicit bench-test precautions.
+
+## Build requirements
+
+For any Cargo build, check, test, or run command for
+`light-robot-core-embedded`, always use the `--release` profile and run the
+command outside the sandbox. The ESP-IDF/Xtensa toolchain and its generated
+artifacts require the host environment; debug builds are not representative of
+the firmware that is flashed.

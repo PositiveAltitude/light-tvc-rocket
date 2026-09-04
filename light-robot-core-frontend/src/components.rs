@@ -1,10 +1,13 @@
 use gloo_timers::callback::Timeout;
+use gloo_timers::future::IntervalStream;
 use light_robot_core_api as api;
 use material_yew::*;
 use reqwasm::http::Request;
 use wasm_bindgen::JsCast;
 use web_sys::{console, CanvasRenderingContext2d, HtmlCanvasElement};
+use yew::platform::spawn_local;
 use yew::prelude::*;
+use yew_hooks::prelude::*;
 
 #[derive(Properties, PartialEq)]
 pub struct ChildrenProps {
@@ -42,11 +45,7 @@ pub fn Card(props: &CardProps) -> Html {
     html!(
         <div class="card">
             <div class="header">
-                {
-                    props.icon.as_ref().map(|icon| html! {
-                        <MatIcon>{icon.clone()}</MatIcon>
-                    }).unwrap_or_default()
-                }
+                if(props.icon.is_some()) {<MatIcon>{props.icon.clone().unwrap()}</MatIcon>}
                 <h2>{props.title.clone()}</h2>
             </div>
             <div class="card-content">{props.children.clone()}</div>
@@ -75,14 +74,17 @@ pub fn TabPage(props: &TabPageProps) -> Html {
 #[function_component]
 pub fn CanvasComponent() -> Html {
     let command_url = "http://lrc.local/command".to_owned();
+    let coordinates = use_state(|| (0f64, 0f64));
     let is_throttled = use_mut_ref(|| false);
     let cancel_timeout = use_mut_ref(|| None::<Timeout>);
 
     let canvas_ref = use_node_ref();
     let canvas_ref2 = canvas_ref.clone();
+    let canvas_ref3 = canvas_ref.clone();
 
     let on_pointer_move = {
         let canvas_ref = canvas_ref.clone();
+        let coordinates = coordinates.clone();
         let is_throttled = is_throttled.clone();
         let cancel_timeout = cancel_timeout.clone();
 
@@ -119,14 +121,14 @@ pub fn CanvasComponent() -> Html {
                 context.line_to(500.0, 1000.0);
                 context.move_to(0.0, 500.0);
                 context.line_to(1000.0, 500.0);
-                context.set_stroke_style_str("black");
+                context.set_stroke_style(&"black".into());
                 context.set_line_width(5.0);
                 context.stroke();
 
                 // Draw circle
                 context.begin_path();
 
-                context.set_stroke_style_str("blue");
+                context.set_stroke_style(&"blue".into());
                 //context.set_fill_style(&"blue".into());
                 context
                     .arc(
@@ -138,7 +140,7 @@ pub fn CanvasComponent() -> Html {
                     )
                     .unwrap();
 
-                console::log_1(&"Go".into());
+                console::log_1(&format!("Go").into());
                 {
                     let s = command_url.clone();
                     let commmand = api::Command::ServoCommand {
@@ -191,8 +193,8 @@ pub fn CanvasComponent() -> Html {
 
     let onpointerup = {
         let command_url = command_url.clone();
-        Callback::from(move |_event: PointerEvent| {
-            console::log_1(&"Stop".into());
+        Callback::from(move |event: PointerEvent| {
+            console::log_1(&format!("Stop").into());
             let s = command_url.clone();
             let commmand = api::Command::ServoCommand {
                 command: api::ServoCommand::Disable,
@@ -225,11 +227,14 @@ pub fn CanvasComponent() -> Html {
 
             // Draw something
 
+            let width = canvas.width() as f64;
+            let height = canvas.height() as f64;
+
             context.move_to(500.0, 0.0);
             context.line_to(500.0, 1000.0);
             context.move_to(0.0, 500.0);
             context.line_to(1000.0, 500.0);
-            context.set_stroke_style_str("black");
+            context.set_stroke_style(&"black".into());
             context.set_line_width(5.0);
             context.stroke();
 

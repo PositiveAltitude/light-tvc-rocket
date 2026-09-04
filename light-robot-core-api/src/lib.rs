@@ -11,6 +11,76 @@ pub struct State {
     pub weight: i32,
     pub chip_id1: [u8; 6],
     pub chip_id2: [u8; 6],
+    pub servo_calibration: ServoCalibrationState,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ServoAxis {
+    X,
+    Y,
+}
+
+impl Default for ServoAxis {
+    fn default() -> Self {
+        Self::X
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServoConfiguration {
+    /// Encoder counts at the mechanically defined TVC zero position.
+    pub zero_encoder_count: u16,
+    /// Physical deflection represented by command -1.0 / +1.0, in degrees.
+    pub max_turn_degrees: f32,
+    pub position_p: f32,
+    pub position_i: f32,
+    pub position_d: f32,
+    pub velocity_p: f32,
+    pub velocity_i: f32,
+    pub duty_cycle_limit: f32,
+    pub max_velocity: f32,
+    pub reverse_motor: bool,
+}
+
+impl Default for ServoConfiguration {
+    fn default() -> Self {
+        Self {
+            zero_encoder_count: 0,
+            max_turn_degrees: 10.0,
+            position_p: 0.02,
+            position_i: 0.0,
+            position_d: 0.0,
+            velocity_p: 0.0,
+            velocity_i: 0.0,
+            duty_cycle_limit: 0.75,
+            max_velocity: 0.0,
+            reverse_motor: false,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ServoCalibrationState {
+    pub x: ServoConfiguration,
+    pub y: ServoConfiguration,
+    pub x_enabled: bool,
+    pub y_enabled: bool,
+    pub detected_x: bool,
+    pub detected_y: bool,
+    pub test_running: bool,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ServoTestSample {
+    pub time_ms: u16,
+    pub position: f32,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ServoTestResult {
+    pub axis: ServoAxis,
+    pub configuration: ServoConfiguration,
+    pub samples: Vec<ServoTestSample>,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -40,11 +110,16 @@ pub struct WifiConnectionConfiguration {
     pub credentials: WifiCredentials,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub enum WifiConnectionType {
     ConnectToExternal,
-    #[default]
     StartAccessPoint,
+}
+
+impl Default for WifiConnectionType {
+    fn default() -> Self {
+        WifiConnectionType::StartAccessPoint
+    }
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -74,11 +149,44 @@ pub enum ServoCommand {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Reset,
-    SetWifi { ssid: String, password: String },
+    SetWifi {
+        ssid: String,
+        password: String,
+    },
     ResetNvs,
-    SetLedColor { r: u8, g: u8, b: u8 },
-    ServoCommand { command: ServoCommand },
-    TestServo { servo_id: u8, start: f32, end: f32 },
+    SetLedColor {
+        r: u8,
+        g: u8,
+        b: u8,
+    },
+    ServoCommand {
+        command: ServoCommand,
+    },
+    TestServo {
+        servo_id: u8,
+        start: f32,
+        end: f32,
+    },
+    DetectServos,
+    SetServoConfiguration {
+        axis: ServoAxis,
+        configuration: ServoConfiguration,
+    },
+    CaptureServoZero {
+        axis: ServoAxis,
+    },
+    SetServoEnabled {
+        axis: ServoAxis,
+        enabled: bool,
+    },
+    SetServoPosition {
+        axis: ServoAxis,
+        position: f32,
+    },
+    StartServoPerformanceTest {
+        axis: ServoAxis,
+    },
+    SaveServoConfigurations,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]

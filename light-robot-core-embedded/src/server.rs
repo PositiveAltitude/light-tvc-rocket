@@ -2,7 +2,7 @@ use light_robot_core_api::*;
 use std::io;
 use std::io::ErrorKind;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use esp_idf_hal::io::EspIOError;
 use esp_idf_svc::http::server::{Connection, EspHttpServer, Request};
 use esp_idf_sys::EspError;
@@ -12,14 +12,14 @@ use std::sync::{Arc, Mutex};
 static DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../light-robot-core-frontend/dist-gz/");
 
 pub struct Server {
-    _server: EspHttpServer<'static>,
+    server: EspHttpServer<'static>,
 }
 
 impl Server {
     pub fn new<F>(
         state: Arc<Mutex<State>>,
-        test_data: Arc<Mutex<TestData>>,
-        command_handler: F,
+        test_data: Arc<Mutex<ServoTestResult>>,
+        mut command_handler: F,
     ) -> Result<Self>
     where
         F: Fn(&Command) -> Result<()> + Send + 'static,
@@ -28,16 +28,14 @@ impl Server {
         use esp_idf_svc::http::server::Method;
         use esp_idf_svc::io::Write;
 
-        let conf = esp_idf_svc::http::server::Configuration {
-            max_resp_headers: 100,
-            max_uri_handlers: 100,
-            ..Default::default()
-        };
+        let mut conf = esp_idf_svc::http::server::Configuration::default();
+        conf.max_resp_headers = 100;
+        conf.max_uri_handlers = 100;
 
         let mut server = EspHttpServer::new(&conf)?;
 
-        fn serve_file(
-            server: &mut EspHttpServer,
+        fn serve_file<'a>(
+            server: &'a mut EspHttpServer,
             path: &'static str,
             content: &'static [u8],
         ) -> Result<(), EspError> {
@@ -49,7 +47,11 @@ impl Server {
                         "application/javascript"
                     } else if path.ends_with(".wasm") {
                         "application/wasm"
-                    } else if path.ends_with(".html") || path.ends_with(".htm") {
+                    } else if path.ends_with(".html") {
+                        "text/html"
+                    } else if path.ends_with(".htm") {
+                        "text/html"
+                    } else if path.ends_with(".html") {
                         "text/html"
                     } else if path.ends_with(".css") {
                         "text/css"
@@ -107,7 +109,7 @@ impl Server {
                         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
                             self.req
                                 .read(buf)
-                                .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, ""))
+                                .map_err(|e| io::Error::new(ErrorKind::BrokenPipe, ""))
                         }
                     }
 
@@ -176,6 +178,6 @@ impl Server {
             serve_dir(&mut server, dir).unwrap();
         }
 
-        Ok(Self { _server: server })
+        Ok(Self { server })
     }
 }
