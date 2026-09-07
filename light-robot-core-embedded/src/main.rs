@@ -1,17 +1,25 @@
 extern crate core;
 
+mod imu;
 mod led_driver;
 mod server;
+mod shared_i2c;
 mod voltage_regulator;
 mod wifi;
 
-use bldc_servo_protocol::{ApiEncodeDecode, GeneralCommandFrame, GeneralResponseFrame, ServoCommandFrame, ServoResponseFrame};
+use crate::imu::Imu;
 use crate::led_driver::LedDriver;
 use crate::server::Server;
+use crate::shared_i2c::SharedI2c;
 use crate::voltage_regulator::VoltageRegulator;
 use crate::wifi::WiFi;
+use bldc_servo_protocol::{
+    ApiEncodeDecode, GeneralCommandFrame, GeneralResponseFrame, ServoCommandFrame,
+    ServoResponseFrame,
+};
 use enumset::EnumSet;
 use esp_idf_hal::can::{CanDriver, Frame};
+use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::Pull;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -22,24 +30,29 @@ use log::info;
 use max170xx::Max17048;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 const BMP_280_FILTER_GAIN: f32 = 0.05f32;
 const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
 const SERVO_TEST_CAPTURE_MS: u64 = 250;
+/// Host polling cadence for the ICM-42688-P output registers.
+const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 
 fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
     let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
-    let delta = (counts_per_degree * configuration.max_turn_degrees.max(0.01) * position.clamp(-1.0, 1.0)) as i32;
+    let delta = (counts_per_degree
+        * configuration.max_turn_degrees.max(0.01)
+        * position.clamp(-1.0, 1.0)) as i32;
     (configuration.zero_encoder_count as i32 + delta).rem_euclid(ENCODER_COUNTS_PER_TURN) as u16
 }
 
 fn encoder_to_normalized_position(configuration: &ServoConfiguration, encoder: u16) -> f32 {
     let half_turn = ENCODER_COUNTS_PER_TURN / 2;
     let delta = (encoder as i32 - configuration.zero_encoder_count as i32 + half_turn)
-        .rem_euclid(ENCODER_COUNTS_PER_TURN) - half_turn;
-    delta as f32 / ((ENCODER_COUNTS_PER_TURN as f32 / 360.0) * configuration.max_turn_degrees.max(0.01))
+        .rem_euclid(ENCODER_COUNTS_PER_TURN)
+        - half_turn;
+    delta as f32
+        / ((ENCODER_COUNTS_PER_TURN as f32 / 360.0) * configuration.max_turn_degrees.max(0.01))
 }
 
 #[derive(Clone)]
@@ -80,13 +93,17 @@ fn main() -> ! {
     info!("Startup: loading saved servo configuration");
     // Do not keep the first MutexGuard alive across the body of `if let`:
     // get_blob needs to take the same mutex and would otherwise deadlock.
-    let saved_configuration_length = {
-        servo_nvs.lock().unwrap().blob_len("axes").ok().flatten()
-    };
+    let saved_configuration_length = { servo_nvs.lock().unwrap().blob_len("axes").ok().flatten() };
     if let Some(length) = saved_configuration_length {
         let mut bytes = vec![0; length];
         let saved_configuration = {
-            servo_nvs.lock().unwrap().get_blob("axes", &mut bytes).ok().flatten().map(Vec::from)
+            servo_nvs
+                .lock()
+                .unwrap()
+                .get_blob("axes", &mut bytes)
+                .ok()
+                .flatten()
+                .map(Vec::from)
         };
         if let Some(bytes) = saved_configuration {
             if let Ok(calibration) = serde_json::from_slice(&bytes) {
@@ -118,53 +135,14 @@ fn main() -> ! {
     .unwrap();
     info!("Startup: I2C ready");
 
-    //let shared_i2c = shared_bus::new_std!(I2cDriver = i2c).unwrap();
-
-    let mut max17048 = Max17048::new(i2c);
+    let i2c = SharedI2c::new(i2c);
+    let mut max17048 = Max17048::new(i2c.clone());
 
     info!("SOC: {:.2}", max17048.soc().unwrap());
     info!("MAX -- OK");
 
-    let max17048 = Arc::new(Mutex::new(max17048));
-
-    // ThreadSpawnConfiguration is process-global. Save and restore it so the
-    // larger stack applies only to the MAX17048 worker, not later library tasks.
-    let default_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
-    esp_idf_hal::task::thread::ThreadSpawnConfiguration {
-        name: Some(c"max-thread"),
-        // The O0 release workaround increases Rust stack use; this thread
-        // performs I2C transactions and updates shared HTTP state.
-        // MAX17048's generic I2C call chain is stack-heavy when Rust is built
-        // at O0 for the Xtensa LLVM workaround. This is isolated to one task;
-        // 32 KiB remains well within the available internal RAM budget.
-        stack_size: 32 * 1024,
-        ..Default::default()
-    }
-    .set()
-    .unwrap();
-
-    let max1 = max17048.clone();
-    let max2 = max17048.clone();
-
-    let state1 = state.clone();
-    let state2 = state.clone();
-
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(1000));
-        let mut state = state1.lock().unwrap();
-        let mut max = max1.lock().unwrap();
-        state.battery.soc = max.soc().unwrap();
-        state.battery.voltage = max.voltage().unwrap();
-        state.battery.charge_rate = max.charge_rate().unwrap();
-    });
-    if let Some(default_thread_config) = default_thread_config {
-        default_thread_config.set().unwrap();
-    }
-
     // let bmp280 = bmp280_ehal::BMP280::new(shared_i2c.acquire_i2c())?;
     // let bmp280 = Arc::new(Mutex::new(bmp280));
-
-    let state_ = state.clone();
 
     // thread::spawn(move || {
     //     loop {
@@ -279,10 +257,16 @@ fn main() -> ! {
                 *calibration_action_.lock().unwrap() =
                     CalibrationAction::Position(*axis, position.clamp(-1.0, 1.0));
             }
-            Command::StartServoPerformanceTest { axis, configuration } => {
+            Command::StartServoPerformanceTest {
+                axis,
+                configuration,
+            } => {
                 let mut calibration = calibration_state.lock().unwrap();
-                if *axis == ServoAxis::X { calibration.servo_calibration.x = configuration.clone(); }
-                else { calibration.servo_calibration.y = configuration.clone(); }
+                if *axis == ServoAxis::X {
+                    calibration.servo_calibration.x = configuration.clone();
+                } else {
+                    calibration.servo_calibration.y = configuration.clone();
+                }
                 *calibration_action_.lock().unwrap() = CalibrationAction::StartTest(*axis)
             }
             Command::AssignServoDevice { axis, device } => {
@@ -333,7 +317,7 @@ fn main() -> ! {
 
     can.start().unwrap();
 
-    thread::sleep(Duration::from_millis(1000));
+    FreeRtos::delay_ms(1000);
 
     info!("START!!!");
 
@@ -480,6 +464,16 @@ fn main() -> ! {
     let servo2_address_master = 3u16;
     let servo2_address_slave = 13u16;
 
+    // The current hardware revision does not route an IMU interrupt to the
+    // MCU. Poll from this main task at 100 Hz instead of using a second Rust
+    // task and cross-core state handoff.
+    let mut imu = Imu::new(i2c);
+    let mut imu_initialized = false;
+    let mut imu_sample_count = 0_u32;
+    let mut last_imu_attempt = Instant::now() - IMU_SAMPLE_PERIOD;
+    let mut imu_failure_reported = false;
+    info!("ICM-42688-P polling enabled (100 Hz)");
+
     let test_data_ = test_data.clone();
     loop {
         let action = std::mem::replace(
@@ -530,12 +524,25 @@ fn main() -> ! {
                 } else {
                     (servo2_address_master, servo2_address_slave)
                 };
-                can.can_transmit(0, &GeneralCommandFrame::ChipID1 { chip_id1: device.chip_id1 });
-                can.can_transmit(0, &GeneralCommandFrame::ChipID2 { chip_id2: device.chip_id2 });
+                can.can_transmit(
+                    0,
+                    &GeneralCommandFrame::ChipID1 {
+                        chip_id1: device.chip_id1,
+                    },
+                );
+                can.can_transmit(
+                    0,
+                    &GeneralCommandFrame::ChipID2 {
+                        chip_id2: device.chip_id2,
+                    },
+                );
                 can.can_transmit(0, &GeneralCommandFrame::SetChannel { master, slave });
                 let mut state = state_.lock().unwrap();
-                if axis == ServoAxis::X { state.servo_calibration.x_device = Some(device); }
-                else { state.servo_calibration.y_device = Some(device); }
+                if axis == ServoAxis::X {
+                    state.servo_calibration.x_device = Some(device);
+                } else {
+                    state.servo_calibration.y_device = Some(device);
+                }
             }
             CalibrationAction::Apply(axis, configuration) => {
                 let address = if axis == ServoAxis::X {
@@ -637,17 +644,36 @@ fn main() -> ! {
                 let zero = configuration.zero_encoder_count;
                 // A test always starts from precisely the configuration shown
                 // in the UI, even when the user did not press Apply first.
-                can.can_transmit(address as u32, &ServoCommandFrame::SetDataRate { data_rate: 1000 });
-                can.can_transmit(address as u32, &ServoCommandFrame::SetGeneralConfig1 {
-                    reverse_motor: configuration.reverse_motor,
-                    duty_cycle_limit: configuration.duty_cycle_limit,
-                });
-                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionPGain { p: configuration.position_p });
-                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionIGain {
-                    i: configuration.position_i,
-                    cycles_to_max_out: 1000,
-                });
-                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionDGain { d: configuration.position_d });
+                can.can_transmit(
+                    address as u32,
+                    &ServoCommandFrame::SetDataRate { data_rate: 1000 },
+                );
+                can.can_transmit(
+                    address as u32,
+                    &ServoCommandFrame::SetGeneralConfig1 {
+                        reverse_motor: configuration.reverse_motor,
+                        duty_cycle_limit: configuration.duty_cycle_limit,
+                    },
+                );
+                can.can_transmit(
+                    address as u32,
+                    &ServoCommandFrame::SetPositionPGain {
+                        p: configuration.position_p,
+                    },
+                );
+                can.can_transmit(
+                    address as u32,
+                    &ServoCommandFrame::SetPositionIGain {
+                        i: configuration.position_i,
+                        cycles_to_max_out: 1000,
+                    },
+                );
+                can.can_transmit(
+                    address as u32,
+                    &ServoCommandFrame::SetPositionDGain {
+                        d: configuration.position_d,
+                    },
+                );
                 can.can_transmit(
                     address as u32,
                     &ServoCommandFrame::BrushedHoldPosition { position: zero },
@@ -677,7 +703,8 @@ fn main() -> ! {
                             if let Ok(ServoResponseFrame::State { position, .. }) =
                                 ServoResponseFrame::api_decode(frame.data())
                             {
-                                let normalized = encoder_to_normalized_position(&configuration, position);
+                                let normalized =
+                                    encoder_to_normalized_position(&configuration, position);
                                 result.samples.push(ServoTestSample {
                                     time_us: started.elapsed().as_micros() as u32,
                                     position: normalized,
@@ -690,12 +717,13 @@ fn main() -> ! {
                 can.can_transmit(address as u32, &ServoCommandFrame::Disable);
                 let mut state = state_.lock().unwrap();
                 state.servo_calibration.test_running = false;
-                if axis == ServoAxis::X { state.servo_calibration.x_enabled = false; }
-                else { state.servo_calibration.y_enabled = false; }
-                state.servo_calibration.test_result_revision = state
-                    .servo_calibration
-                    .test_result_revision
-                    .wrapping_add(1);
+                if axis == ServoAxis::X {
+                    state.servo_calibration.x_enabled = false;
+                } else {
+                    state.servo_calibration.y_enabled = false;
+                }
+                state.servo_calibration.test_result_revision =
+                    state.servo_calibration.test_result_revision.wrapping_add(1);
                 info!("Servo step-response test finished");
             }
             CalibrationAction::Save => {
@@ -770,6 +798,41 @@ fn main() -> ! {
 
         */
 
+        if last_imu_attempt.elapsed() >= IMU_SAMPLE_PERIOD {
+            last_imu_attempt = Instant::now();
+            if !imu_initialized {
+                match imu.initialize() {
+                    Ok(()) => imu_initialized = true,
+                    Err(error) => {
+                        if !imu_failure_reported {
+                            info!("ICM-42688-P initialization failed: {:?}", error);
+                            imu_failure_reported = true;
+                        }
+                    }
+                }
+            }
+            if imu_initialized {
+                imu_sample_count = imu_sample_count.wrapping_add(1);
+                match imu.read(imu_sample_count) {
+                    Ok(reading) => {
+                        imu_failure_reported = false;
+                        state_.lock().unwrap().imu = reading;
+                    }
+                    Err(error) => {
+                        if !imu_failure_reported {
+                            info!(
+                                "ICM-42688-P read failed: {:?}; retrying initialization",
+                                error
+                            );
+                            imu_failure_reported = true;
+                        }
+                        imu_initialized = false;
+                        state_.lock().unwrap().imu.present = false;
+                    }
+                }
+            }
+        }
+
         let can_receive_result = can.receive(0);
 
         match can_receive_result {
@@ -812,10 +875,10 @@ fn main() -> ! {
             Err(_) => {}
         }
 
-        // A host-style yield can immediately reschedule this busy loop on the
-        // same core. Use a real FreeRTOS-backed delay so IDLE0 runs and feeds
-        // the task watchdog between CAN polling iterations.
-        thread::sleep(Duration::from_millis(1));
+        // Yield to FreeRTOS so IDLE0 can run and feed the task watchdog between
+        // CAN polling iterations. std::thread::sleep maps to ets_delay_us on
+        // this target and spins instead of yielding.
+        FreeRtos::delay_ms(1);
     }
 
     // #[allow(unreachable_code)]

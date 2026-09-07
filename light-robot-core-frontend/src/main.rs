@@ -1,7 +1,7 @@
 mod components;
 
 use crate::components::*;
-use gloo::timers::callback::Timeout;
+use gloo::timers::callback::Interval;
 use light_robot_core_api::*;
 use material_yew::{MatTab, MatTabBar};
 use reqwasm::http::Request;
@@ -60,8 +60,18 @@ fn axis_name(axis: ServoAxis) -> &'static str {
 }
 
 fn device_name(device: &ServoDeviceId) -> String {
-    let id1 = device.chip_id1.iter().map(|byte| format!("{:02X}", byte)).collect::<Vec<_>>().join("");
-    let id2 = device.chip_id2.iter().map(|byte| format!("{:02X}", byte)).collect::<Vec<_>>().join("");
+    let id1 = device
+        .chip_id1
+        .iter()
+        .map(|byte| format!("{:02X}", byte))
+        .collect::<Vec<_>>()
+        .join("");
+    let id2 = device
+        .chip_id2
+        .iter()
+        .map(|byte| format!("{:02X}", byte))
+        .collect::<Vec<_>>()
+        .join("");
     format!("{} / {}", id1, id2)
 }
 
@@ -78,17 +88,35 @@ fn ServoCalibration() -> Html {
     let draft = use_state(|| ConfigDraft::from_config(&ServoConfiguration::default()));
     let socket = use_websocket("ws://lrc.local/ws".to_owned());
     {
-        let state = state.clone(); let tests = tests.clone(); let testing = testing.clone();
-        use_effect_with_deps(move |message| {
-            if let Some(message) = &**message {
-                if let Ok(SocketMessage::State(new_state)) = serde_json::from_str::<SocketMessage>(message) { state.set(new_state); }
-                if let Ok(SocketMessage::TestResult(result)) = serde_json::from_str::<SocketMessage>(message) {
-                    let mut all = (*tests).clone(); let color = TEST_COLORS[all.len() % TEST_COLORS.len()];
-                    all.push(StoredTest { result, visible: true, color }); tests.set(all); testing.set(false);
+        let state = state.clone();
+        let tests = tests.clone();
+        let testing = testing.clone();
+        use_effect_with_deps(
+            move |message| {
+                if let Some(message) = &**message {
+                    if let Ok(SocketMessage::State(new_state)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        state.set(new_state);
+                    }
+                    if let Ok(SocketMessage::TestResult(result)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        let mut all = (*tests).clone();
+                        let color = TEST_COLORS[all.len() % TEST_COLORS.len()];
+                        all.push(StoredTest {
+                            result,
+                            visible: true,
+                            color,
+                        });
+                        tests.set(all);
+                        testing.set(false);
+                    }
                 }
-            }
-            || ()
-        }, socket.message.clone());
+                || ()
+            },
+            socket.message.clone(),
+        );
     }
     let select_axis = |new_axis: ServoAxis| {
         let axis = axis.clone();
@@ -119,13 +147,19 @@ fn ServoCalibration() -> Html {
             let text = event.target_unchecked_into::<HtmlInputElement>().value();
             let mut next_draft = (*draft).clone();
             match field {
-                "zero" => next_draft.zero = text.clone(), "turn" => next_draft.turn = text.clone(),
-                "p" => next_draft.p = text.clone(), "i" => next_draft.i = text.clone(),
-                "d" => next_draft.d = text.clone(), "limit" => next_draft.limit = text.clone(), _ => {}
+                "zero" => next_draft.zero = text.clone(),
+                "turn" => next_draft.turn = text.clone(),
+                "p" => next_draft.p = text.clone(),
+                "i" => next_draft.i = text.clone(),
+                "d" => next_draft.d = text.clone(),
+                "limit" => next_draft.limit = text.clone(),
+                _ => {}
             }
             draft.set(next_draft);
             let value = text.parse::<f32>();
-            let Ok(value) = value else { return; };
+            let Ok(value) = value else {
+                return;
+            };
             let mut c = (*config).clone();
             match field {
                 "turn" => c.max_turn_degrees = value,
@@ -152,16 +186,25 @@ fn ServoCalibration() -> Html {
         let config = config.clone();
         let socket = socket.clone();
         Callback::from(move |_| {
-            send_command(&socket, Command::SetServoConfiguration {
-                axis: *axis,
-                configuration: (*config).clone(),
-            })
+            send_command(
+                &socket,
+                Command::SetServoConfiguration {
+                    axis: *axis,
+                    configuration: (*config).clone(),
+                },
+            )
         })
     };
     let choose_device = {
         let selected_device = selected_device.clone();
         Callback::from(move |event: Event| {
-            selected_device.set(event.target_unchecked_into::<HtmlInputElement>().value().parse::<usize>().unwrap_or(0));
+            selected_device.set(
+                event
+                    .target_unchecked_into::<HtmlInputElement>()
+                    .value()
+                    .parse::<usize>()
+                    .unwrap_or(0),
+            );
         })
     };
     let assign_device = {
@@ -170,8 +213,18 @@ fn ServoCalibration() -> Html {
         let state = state.clone();
         let socket = socket.clone();
         Callback::from(move |_| {
-            if let Some(device) = state.servo_calibration.discovered_devices.get(*selected_device) {
-                send_command(&socket, Command::AssignServoDevice { axis: *axis, device: device.clone() });
+            if let Some(device) = state
+                .servo_calibration
+                .discovered_devices
+                .get(*selected_device)
+            {
+                send_command(
+                    &socket,
+                    Command::AssignServoDevice {
+                        axis: *axis,
+                        device: device.clone(),
+                    },
+                );
             }
         })
     };
@@ -183,7 +236,11 @@ fn ServoCalibration() -> Html {
         let draft = draft.clone();
         Callback::from(move |_| {
             let mut next = (*config).clone();
-            next.zero_encoder_count = if *axis == ServoAxis::X { state.servo1.position } else { state.servo2.position };
+            next.zero_encoder_count = if *axis == ServoAxis::X {
+                state.servo1.position
+            } else {
+                state.servo2.position
+            };
             let mut next_draft = (*draft).clone();
             next_draft.zero = next.zero_encoder_count.to_string();
             draft.set(next_draft);
@@ -198,10 +255,13 @@ fn ServoCalibration() -> Html {
         Callback::from(move |_| {
             let on = !*enabled;
             enabled.set(on);
-            send_command(&socket, Command::SetServoEnabled {
-                axis: *axis,
-                enabled: on,
-            });
+            send_command(
+                &socket,
+                Command::SetServoEnabled {
+                    axis: *axis,
+                    enabled: on,
+                },
+            );
         })
     };
     let manual = {
@@ -228,10 +288,13 @@ fn ServoCalibration() -> Html {
                 .unwrap_or(0.0)
                 .clamp(-1.0, 1.0);
             if *enabled {
-                send_command(&socket, Command::SetServoPosition {
-                    axis: *axis,
-                    position: p,
-                });
+                send_command(
+                    &socket,
+                    Command::SetServoPosition {
+                        axis: *axis,
+                        position: p,
+                    },
+                );
             }
         })
     };
@@ -242,10 +305,19 @@ fn ServoCalibration() -> Html {
         let socket = socket.clone();
         Callback::from(move |_| {
             testing.set(true);
-            send_command(&socket, Command::StartServoPerformanceTest { axis: *axis, configuration: (*config).clone() });
+            send_command(
+                &socket,
+                Command::StartServoPerformanceTest {
+                    axis: *axis,
+                    configuration: (*config).clone(),
+                },
+            );
         })
     };
-    let save = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::SaveServoConfigurations)) };
+    let save = {
+        let socket = socket.clone();
+        Callback::from(move |_| send_command(&socket, Command::SaveServoConfigurations))
+    };
     let detected = if *axis == ServoAxis::X {
         state.servo_calibration.detected_x
     } else {
@@ -256,7 +328,11 @@ fn ServoCalibration() -> Html {
     } else {
         state.servo2.position
     };
-    let assigned_device = if *axis == ServoAxis::X { state.servo_calibration.x_device.as_ref() } else { state.servo_calibration.y_device.as_ref() };
+    let assigned_device = if *axis == ServoAxis::X {
+        state.servo_calibration.x_device.as_ref()
+    } else {
+        state.servo_calibration.y_device.as_ref()
+    };
     let device_picker = if state.servo_calibration.discovered_devices.is_empty() {
         html! { <p>{"No servos were detected at startup. Check CAN power, wiring, and termination, then reboot."}</p> }
     } else {
@@ -334,13 +410,58 @@ fn TestTable(props: &TestTableProps) -> Html {
 }
 
 #[function_component]
+fn FlightDashboard() -> Html {
+    let state = use_state_eq(State::default);
+    {
+        let state = state.clone();
+        use_effect_with_deps(
+            move |_| {
+                let refresh = move || {
+                    let state = state.clone();
+                    spawn_local(async move {
+                        if let Some(next_state) = fetch::<State>("/state").await {
+                            state.set(next_state);
+                        }
+                    });
+                };
+                refresh();
+                let interval = Interval::new(250, refresh);
+                move || drop(interval)
+            },
+            (),
+        );
+    }
+    let state = &*state;
+    let imu = &state.imu;
+    let format_axis = |values: &[f32; 3]| {
+        format!(
+            "X {:+.2}   Y {:+.2}   Z {:+.2}",
+            values[0], values[1], values[2]
+        )
+    };
+    html! {
+        <>
+            <Card title="TVC flight computer" icon="rocket_launch">
+                <p>{"Live flight-sensor status. IMU values are refreshed in the dashboard at 4 Hz."}</p>
+            </Card>
+            <Card title="ICM-42688-P inertial measurement" icon="sensors">
+                <div class="imu-status">{if imu.present { "ONLINE — 100 HZ ACQUISITION" } else { "OFFLINE — CHECK I²C SENSOR" }}</div>
+                <div class="imu-reading"><span>{"ACCELERATION (M/S²)"}</span><code>{format_axis(&imu.acceleration_mps2)}</code></div>
+                <div class="imu-reading"><span>{"ANGULAR VELOCITY (RAD/S)"}</span><code>{format_axis(&imu.angular_velocity_radps)}</code></div>
+                <small>{format!("{} successful samples", imu.sample_count)}</small>
+            </Card>
+        </>
+    }
+}
+
+#[function_component]
 fn App() -> Html {
     let tab = use_state(|| 0_usize);
     let activated = {
         let tab = tab.clone();
         Callback::from(move |id| tab.set(id))
     };
-    html! { <div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="tune"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><Card title="TVC flight computer" icon="rocket_launch"><p>{"Open the tune tab to configure and characterize the X and Y TVC servomotors."}</p></Card></TabPage><TabPage id=1 current_id={*tab}><ServoCalibration/></TabPage><TabPage id=2 current_id={*tab}><p>{"System settings"}</p></TabPage></div></div> }
+    html! { <div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="tune"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><FlightDashboard/></TabPage><TabPage id=1 current_id={*tab}><ServoCalibration/></TabPage><TabPage id=2 current_id={*tab}><p>{"System settings"}</p></TabPage></div></div> }
 }
 fn main() {
     yew::Renderer::<App>::new().render();

@@ -3,15 +3,15 @@ use std::io;
 use std::io::ErrorKind;
 
 use anyhow::{Error, Result};
+use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::io::EspIOError;
-use esp_idf_svc::http::server::{Connection, EspHttpServer, Request};
 use esp_idf_svc::http::server::ws::EspHttpWsDetachedSender;
+use esp_idf_svc::http::server::{Connection, EspHttpServer, Request};
 use esp_idf_svc::ws::FrameType;
 use esp_idf_sys::EspError;
 use include_dir::{include_dir, Dir};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 static DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../light-robot-core-frontend/dist-gz/");
 
@@ -200,9 +200,12 @@ impl Server {
         thread::spawn(move || {
             let mut sent_test_revision = 0;
             loop {
-                thread::sleep(Duration::from_millis(50));
+                FreeRtos::delay_ms(50);
                 let state = ws_state.lock().unwrap().clone();
-                let mut sender = match ws_sender.lock().unwrap().clone() { Some(sender) => sender, None => continue };
+                let mut sender = match ws_sender.lock().unwrap().clone() {
+                    Some(sender) => sender,
+                    None => continue,
+                };
                 // Do not compete with the time-sensitive CAN capture loop.
                 // The final result and fresh state are sent immediately after
                 // the test clears this flag.

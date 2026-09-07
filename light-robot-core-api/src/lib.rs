@@ -6,6 +6,7 @@ pub struct State {
     pub pyro: PyroState,
     pub wifi_state: WifiConnectionConfiguration,
     pub barometer: BarometerState,
+    pub imu: ImuState,
     pub servo1: ServoState,
     pub servo2: ServoState,
     pub weight: i32,
@@ -154,6 +155,21 @@ pub struct PyroState {
 pub struct BarometerState {
     pub altitude: f32,
     pub temperature: f32,
+}
+
+/// Latest raw inertial measurement from the board-mounted ICM-42688-P.
+///
+/// Acceleration is expressed in m/s² and angular velocity in rad/s, using the
+/// ICM-42688-P's configured ±16 g and ±2000 °/s ranges respectively. The axes are
+/// the physical sensor axes; board-to-vehicle alignment is intentionally not
+/// applied here.
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ImuState {
+    pub present: bool,
+    pub acceleration_mps2: [f32; 3],
+    pub angular_velocity_radps: [f32; 3],
+    /// Monotonically wrapping count of successful 100 Hz samples.
+    pub sample_count: u32,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
