@@ -3,8 +3,11 @@
 # request deserialization before worker tasks start.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
-# Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
-# This allows to use 1 ms granularity for thread sleeps (10 ms by default).
+# Enable ESP-IDF HTTP server WebSocket support for live calibration telemetry.
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# Keep ESP-IDF's standard 100 Hz kernel tick. Servo timing is driven by the
+# servo's hardware timer, rather than by the RTOS scheduler tick.
 #CONFIG_FREERTOS_HZ=1000
 
 # Workaround for https://github.com/espressif/esp-idf/issues/7631

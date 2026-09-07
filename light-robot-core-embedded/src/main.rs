@@ -26,6 +26,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const BMP_280_FILTER_GAIN: f32 = 0.05f32;
+const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
+const SERVO_TEST_CAPTURE_MS: u64 = 250;
+
+fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
+    let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
+    let delta = (counts_per_degree * configuration.max_turn_degrees.max(0.01) * position.clamp(-1.0, 1.0)) as i32;
+    (configuration.zero_encoder_count as i32 + delta).rem_euclid(ENCODER_COUNTS_PER_TURN) as u16
+}
+
+fn encoder_to_normalized_position(configuration: &ServoConfiguration, encoder: u16) -> f32 {
+    let half_turn = ENCODER_COUNTS_PER_TURN / 2;
+    let delta = (encoder as i32 - configuration.zero_encoder_count as i32 + half_turn)
+        .rem_euclid(ENCODER_COUNTS_PER_TURN) - half_turn;
+    delta as f32 / ((ENCODER_COUNTS_PER_TURN as f32 / 360.0) * configuration.max_turn_degrees.max(0.01))
+}
 
 #[derive(Clone)]
 enum CalibrationAction {
@@ -36,12 +51,14 @@ enum CalibrationAction {
     Enable(ServoAxis, bool),
     Position(ServoAxis, f32),
     StartTest(ServoAxis),
+    AssignDevice(ServoAxis, ServoDeviceId),
     Save,
 }
 
 fn main() -> ! {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+    info!("Startup: logger ready");
 
     let state = Arc::new(Mutex::new(api::State::default()));
 
@@ -49,7 +66,9 @@ fn main() -> ! {
     let calibration_action = Arc::new(Mutex::new(CalibrationAction::None));
 
     let peripherals = Peripherals::take().unwrap();
+    info!("Startup: peripherals taken");
     let sysloop = EspSystemEventLoop::take().unwrap();
+    info!("Startup: system event loop ready");
 
     // Wi-Fi's PHY calibration and servo calibration persistence both use NVS.
     // Take/initialize the default partition before constructing EspWifi so RF
@@ -57,17 +76,30 @@ fn main() -> ! {
     let servo_nvs = Arc::new(Mutex::new(
         EspDefaultNvs::new(EspDefaultNvsPartition::take().unwrap(), "servo_cfg", true).unwrap(),
     ));
-    if let Ok(Some(length)) = servo_nvs.lock().unwrap().blob_len("axes") {
+    info!("Startup: NVS ready");
+    info!("Startup: loading saved servo configuration");
+    // Do not keep the first MutexGuard alive across the body of `if let`:
+    // get_blob needs to take the same mutex and would otherwise deadlock.
+    let saved_configuration_length = {
+        servo_nvs.lock().unwrap().blob_len("axes").ok().flatten()
+    };
+    if let Some(length) = saved_configuration_length {
         let mut bytes = vec![0; length];
-        if let Ok(Some(bytes)) = servo_nvs.lock().unwrap().get_blob("axes", &mut bytes) {
-            if let Ok(calibration) = serde_json::from_slice(bytes) {
+        let saved_configuration = {
+            servo_nvs.lock().unwrap().get_blob("axes", &mut bytes).ok().flatten().map(Vec::from)
+        };
+        if let Some(bytes) = saved_configuration {
+            if let Ok(calibration) = serde_json::from_slice(&bytes) {
                 state.lock().unwrap().servo_calibration = calibration;
             }
         }
     }
+    info!("Startup: saved servo configuration loaded");
 
     let mut voltage_regulator = VoltageRegulator::new(peripherals.pins.gpio21);
+    info!("Startup: regulator GPIO ready");
     voltage_regulator.on().unwrap();
+    info!("Startup: regulator enabled");
 
     let _button = esp_idf_hal::gpio::PinDriver::input(peripherals.pins.gpio15, Pull::Up).unwrap();
 
@@ -84,6 +116,7 @@ fn main() -> ! {
         &esp_idf_hal::i2c::I2cConfig::default(),
     )
     .unwrap();
+    info!("Startup: I2C ready");
 
     //let shared_i2c = shared_bus::new_std!(I2cDriver = i2c).unwrap();
 
@@ -201,11 +234,6 @@ fn main() -> ! {
     let pyro1_ = Arc::new(Mutex::new(pyro1));
     let pyro2_ = Arc::new(Mutex::new(pyro2));
 
-    let cc: ServoCommand = ServoCommand::Disable;
-    let car_command_ = Arc::new(Mutex::new(cc));
-
-    let car_command = car_command_.clone();
-    let calibration_car_command = car_command_.clone();
     let calibration_action_ = calibration_action.clone();
     let calibration_state = state.clone();
     let command_handler = move |c: &api::Command| -> anyhow::Result<()> {
@@ -219,28 +247,6 @@ fn main() -> ! {
                     .set_rgb(r.clone(), g.clone(), b.clone())
                     .unwrap();
             }
-            Command::ServoCommand { command } => {
-                let mut car_command = car_command.lock().unwrap();
-                let cc = (*command).clone();
-                match cc {
-                    ServoCommand::Disable => {
-                        *car_command = cc;
-                    }
-                    ServoCommand::Update {
-                        servo1: steering,
-                        servo2: power,
-                    } => {
-                        let s = steering.clamp(-1.0, 1.0);
-                        let p = power.clamp(-1.0, 1.0);
-                        *car_command = ServoCommand::Update {
-                            servo1: s,
-                            servo2: p,
-                        };
-                    }
-                }
-                *car_command = (*command).clone();
-            }
-
             Command::DetectServos => {
                 *calibration_action_.lock().unwrap() = CalibrationAction::Detect
             }
@@ -267,28 +273,21 @@ fn main() -> ! {
                 } else {
                     calibration.servo_calibration.y_enabled = *enabled;
                 }
-                if !enabled {
-                    *calibration_car_command.lock().unwrap() = ServoCommand::Disable;
-                }
                 *calibration_action_.lock().unwrap() = CalibrationAction::Enable(*axis, *enabled);
             }
             Command::SetServoPosition { axis, position } => {
-                // Keep the selected motor holding between UI updates; the opposite axis stays at zero.
-                *calibration_car_command.lock().unwrap() = match axis {
-                    ServoAxis::X => ServoCommand::Update {
-                        servo1: position.clamp(-1.0, 1.0),
-                        servo2: 0.0,
-                    },
-                    ServoAxis::Y => ServoCommand::Update {
-                        servo1: 0.0,
-                        servo2: position.clamp(-1.0, 1.0),
-                    },
-                };
                 *calibration_action_.lock().unwrap() =
                     CalibrationAction::Position(*axis, position.clamp(-1.0, 1.0));
             }
-            Command::StartServoPerformanceTest { axis } => {
+            Command::StartServoPerformanceTest { axis, configuration } => {
+                let mut calibration = calibration_state.lock().unwrap();
+                if *axis == ServoAxis::X { calibration.servo_calibration.x = configuration.clone(); }
+                else { calibration.servo_calibration.y = configuration.clone(); }
                 *calibration_action_.lock().unwrap() = CalibrationAction::StartTest(*axis)
+            }
+            Command::AssignServoDevice { axis, device } => {
+                *calibration_action_.lock().unwrap() =
+                    CalibrationAction::AssignDevice(*axis, device.clone())
             }
             Command::SaveServoConfigurations => {
                 *calibration_action_.lock().unwrap() = CalibrationAction::Save
@@ -468,74 +467,19 @@ fn main() -> ! {
     }
 
     info!("Servo detection END");
+    state.lock().unwrap().servo_calibration.discovered_devices = chip_ids
+        .iter()
+        .map(|(chip_id1, chip_id2)| ServoDeviceId {
+            chip_id1: *chip_id1,
+            chip_id2: *chip_id2,
+        })
+        .collect();
 
     let servo1_address_master = 2u16;
     let servo1_address_slave = 12u16;
     let servo2_address_master = 3u16;
     let servo2_address_slave = 13u16;
 
-    //servo1
-    {
-        let chip_id1: [u8; 6] = [57, 0, 64, 0, 14, 80];
-        let chip_id2: [u8; 6] = [65, 50, 77, 54, 55, 32];
-
-        can.can_transmit(0, &GeneralCommandFrame::ChipID1 { chip_id1 });
-        can.can_transmit(0, &GeneralCommandFrame::ChipID2 { chip_id2 });
-        can.can_transmit(
-            0,
-            &GeneralCommandFrame::SetChannel {
-                master: servo1_address_master,
-                slave: servo1_address_slave,
-            },
-        );
-        can.can_transmit(
-            servo1_address_master as u32,
-            &ServoCommandFrame::SetDataRate { data_rate: 500 },
-        );
-        can.can_transmit(
-            servo1_address_master as u32,
-            &ServoCommandFrame::SetGeneralConfig1 {
-                duty_cycle_limit: 0.75,
-                reverse_motor: false,
-            },
-        );
-        can.can_transmit(
-            servo1_address_master as u32,
-            &ServoCommandFrame::SetPositionPGain { p: 0.02 },
-        );
-    }
-    //servo2
-    {
-        let chip_id1: [u8; 6] = [59, 0, 97, 0, 14, 80];
-        let chip_id2: [u8; 6] = [65, 50, 77, 54, 55, 32];
-
-        can.can_transmit(0, &GeneralCommandFrame::ChipID1 { chip_id1 });
-        can.can_transmit(0, &GeneralCommandFrame::ChipID2 { chip_id2 });
-        can.can_transmit(
-            0,
-            &GeneralCommandFrame::SetChannel {
-                master: servo2_address_master,
-                slave: servo2_address_slave,
-            },
-        );
-        can.can_transmit(
-            servo2_address_master as u32,
-            &ServoCommandFrame::SetDataRate { data_rate: 10 },
-        );
-        can.can_transmit(
-            servo2_address_master as u32,
-            &ServoCommandFrame::SetGeneralConfig1 {
-                duty_cycle_limit: 0.75,
-                reverse_motor: false,
-            },
-        );
-        can.can_transmit(
-            servo2_address_master as u32,
-            &ServoCommandFrame::SetPositionPGain { p: 0.01 },
-        );
-    }
-
-    let car_command = car_command_.clone();
     let test_data_ = test_data.clone();
     loop {
         let action = std::mem::replace(
@@ -545,8 +489,53 @@ fn main() -> ! {
         match action {
             CalibrationAction::None => {}
             CalibrationAction::Detect => {
-                // Discovery is broadcast and non-destructive. Incoming state frames set the per-axis detected flags.
+                // Query each identity half in sequence so ChipID2 is paired to
+                // the ChipID1 which requested it.
                 can.can_transmit(0, &GeneralCommandFrame::RequestChipId1);
+                let mut chip_id1s = HashSet::new();
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_millis(100) {
+                    if let Ok(frame) = can.receive(5) {
+                        if frame.identifier() == 1 {
+                            if let Ok(GeneralResponseFrame::ChipID1 { chip_id1 }) =
+                                GeneralResponseFrame::api_decode(frame.data())
+                            {
+                                chip_id1s.insert(chip_id1);
+                            }
+                        }
+                    }
+                }
+                let mut discovered = Vec::new();
+                for chip_id1 in chip_id1s {
+                    can.can_transmit(0, &GeneralCommandFrame::RequestChipId2 { chip_id1 });
+                    let started = Instant::now();
+                    while started.elapsed() < Duration::from_millis(100) {
+                        if let Ok(frame) = can.receive(5) {
+                            if frame.identifier() == 1 {
+                                if let Ok(GeneralResponseFrame::ChipID2 { chip_id2 }) =
+                                    GeneralResponseFrame::api_decode(frame.data())
+                                {
+                                    discovered.push(ServoDeviceId { chip_id1, chip_id2 });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                state_.lock().unwrap().servo_calibration.discovered_devices = discovered;
+            }
+            CalibrationAction::AssignDevice(axis, device) => {
+                let (master, slave) = if axis == ServoAxis::X {
+                    (servo1_address_master, servo1_address_slave)
+                } else {
+                    (servo2_address_master, servo2_address_slave)
+                };
+                can.can_transmit(0, &GeneralCommandFrame::ChipID1 { chip_id1: device.chip_id1 });
+                can.can_transmit(0, &GeneralCommandFrame::ChipID2 { chip_id2: device.chip_id2 });
+                can.can_transmit(0, &GeneralCommandFrame::SetChannel { master, slave });
+                let mut state = state_.lock().unwrap();
+                if axis == ServoAxis::X { state.servo_calibration.x_device = Some(device); }
+                else { state.servo_calibration.y_device = Some(device); }
             }
             CalibrationAction::Apply(axis, configuration) => {
                 let address = if axis == ServoAxis::X {
@@ -584,25 +573,6 @@ fn main() -> ! {
                         d: configuration.position_d,
                     },
                 );
-                can.can_transmit(
-                    address as u32,
-                    &ServoCommandFrame::SetVelocityPGain {
-                        p: configuration.velocity_p,
-                    },
-                );
-                can.can_transmit(
-                    address as u32,
-                    &ServoCommandFrame::SetVelocityIGain {
-                        i: configuration.velocity_i,
-                        cycles_to_max_out: 1000,
-                    },
-                );
-                can.can_transmit(
-                    address as u32,
-                    &ServoCommandFrame::SetMaxVelocity {
-                        v: configuration.max_velocity,
-                    },
-                );
             }
             CalibrationAction::CaptureZero(axis) => {
                 let position = if axis == ServoAxis::X {
@@ -634,10 +604,7 @@ fn main() -> ! {
                 } else {
                     &s.servo_calibration.y
                 };
-                let full_scale_counts = if axis == ServoAxis::X { 825.0 } else { 469.0 };
-                let encoder = (c.zero_encoder_count as i32
-                    + (full_scale_counts * c.max_turn_degrees / 10.0 * position) as i32)
-                    .rem_euclid(4096) as u16;
+                let encoder = normalized_position_to_encoder(c, position);
                 let address = if axis == ServoAxis::X {
                     servo1_address_master
                 } else {
@@ -645,11 +612,12 @@ fn main() -> ! {
                 };
                 can.can_transmit(
                     address as u32,
-                    &ServoCommandFrame::BrushlessHoldPosition { position: encoder },
+                    &ServoCommandFrame::BrushedHoldPosition { position: encoder },
                 );
             }
             CalibrationAction::StartTest(axis) => {
                 info!("Servo step-response test started");
+                state_.lock().unwrap().servo_calibration.test_running = true;
                 let (address, slave, configuration) = {
                     let s = state_.lock().unwrap();
                     if axis == ServoAxis::X {
@@ -667,36 +635,51 @@ fn main() -> ! {
                     }
                 };
                 let zero = configuration.zero_encoder_count;
+                // A test always starts from precisely the configuration shown
+                // in the UI, even when the user did not press Apply first.
+                can.can_transmit(address as u32, &ServoCommandFrame::SetDataRate { data_rate: 1000 });
+                can.can_transmit(address as u32, &ServoCommandFrame::SetGeneralConfig1 {
+                    reverse_motor: configuration.reverse_motor,
+                    duty_cycle_limit: configuration.duty_cycle_limit,
+                });
+                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionPGain { p: configuration.position_p });
+                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionIGain {
+                    i: configuration.position_i,
+                    cycles_to_max_out: 1000,
+                });
+                can.can_transmit(address as u32, &ServoCommandFrame::SetPositionDGain { d: configuration.position_d });
                 can.can_transmit(
                     address as u32,
-                    &ServoCommandFrame::BrushlessHoldPosition { position: zero },
+                    &ServoCommandFrame::BrushedHoldPosition { position: zero },
                 );
-                thread::sleep(Duration::from_secs(2));
-                let target = (zero as i32
-                    + (if axis == ServoAxis::X { 825.0 } else { 469.0 }) as i32 * 3 / 4)
-                    .rem_euclid(4096) as u16;
+                // Keep the CAN RX FIFO empty while the actuator settles.
+                // Otherwise pre-step telemetry is consumed at capture time and
+                // appears as a vertical spike at t=0 in the response plot.
+                let settling_started = Instant::now();
+                while settling_started.elapsed() < Duration::from_secs(2) {
+                    let _ = can.receive(1);
+                }
+                while can.receive(0).is_ok() {}
+                let target = normalized_position_to_encoder(&configuration, 0.75);
                 let mut result = ServoTestResult {
                     axis,
-                    configuration,
+                    configuration: configuration.clone(),
                     samples: Vec::new(),
                 };
                 let started = Instant::now();
                 can.can_transmit(
                     address as u32,
-                    &ServoCommandFrame::BrushlessHoldPosition { position: target },
+                    &ServoCommandFrame::BrushedHoldPosition { position: target },
                 );
-                while started.elapsed() < Duration::from_millis(500) {
+                while started.elapsed() < Duration::from_millis(SERVO_TEST_CAPTURE_MS) {
                     if let Ok(frame) = can.receive(1) {
                         if frame.identifier() == slave as u32 {
                             if let Ok(ServoResponseFrame::State { position, .. }) =
                                 ServoResponseFrame::api_decode(frame.data())
                             {
-                                let normalized = ((position as i32 - zero as i32 + 2048)
-                                    .rem_euclid(4096)
-                                    - 2048) as f32
-                                    / if axis == ServoAxis::X { 825.0 } else { 469.0 };
+                                let normalized = encoder_to_normalized_position(&configuration, position);
                                 result.samples.push(ServoTestSample {
-                                    time_ms: started.elapsed().as_millis() as u16,
+                                    time_us: started.elapsed().as_micros() as u32,
                                     position: normalized,
                                 });
                             }
@@ -704,6 +687,15 @@ fn main() -> ! {
                     }
                 }
                 *test_data_.lock().unwrap() = result;
+                can.can_transmit(address as u32, &ServoCommandFrame::Disable);
+                let mut state = state_.lock().unwrap();
+                state.servo_calibration.test_running = false;
+                if axis == ServoAxis::X { state.servo_calibration.x_enabled = false; }
+                else { state.servo_calibration.y_enabled = false; }
+                state.servo_calibration.test_result_revision = state
+                    .servo_calibration
+                    .test_result_revision
+                    .wrapping_add(1);
                 info!("Servo step-response test finished");
             }
             CalibrationAction::Save => {
@@ -820,40 +812,10 @@ fn main() -> ! {
             Err(_) => {}
         }
 
-        let car_command = car_command.lock().unwrap();
-        match *car_command {
-            ServoCommand::Disable => {
-                can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
-                can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable);
-            }
-            ServoCommand::Update {
-                servo1: steering,
-                servo2: power,
-            } => {
-                let steering_setpoint =
-                    (1358i32 + (825.0 * steering) as i32).rem_euclid(4096) as u16;
-                can.can_transmit(
-                    servo1_address_master as u32,
-                    &ServoCommandFrame::BrushlessHoldPosition {
-                        position: steering_setpoint,
-                    },
-                );
-
-                let steering_setpoint = (2376i32 + (469.0 * power) as i32).rem_euclid(4096) as u16;
-                can.can_transmit(
-                    servo2_address_master as u32,
-                    &ServoCommandFrame::BrushlessHoldPosition {
-                        position: steering_setpoint,
-                    },
-                );
-            }
-        }
-
-        // can.can_transmit(2, &ServoCommandFrame::HoldPosition { setpoint: 500 });
-        // thread::sleep(Duration::from_millis(2000));
-        // can.can_transmit(2, &ServoCommandFrame::HoldPosition { setpoint: 2500 });
-        //thread::sleep(Duration::from_millis(1));
-        thread::yield_now();
+        // A host-style yield can immediately reschedule this busy loop on the
+        // same core. Use a real FreeRTOS-backed delay so IDLE0 runs and feeds
+        // the task watchdog between CAN polling iterations.
+        thread::sleep(Duration::from_millis(1));
     }
 
     // #[allow(unreachable_code)]

@@ -20,6 +20,13 @@ pub enum ServoAxis {
     Y,
 }
 
+/// The two 48-bit identity halves reported by a servo during CAN discovery.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ServoDeviceId {
+    pub chip_id1: [u8; 6],
+    pub chip_id2: [u8; 6],
+}
+
 impl Default for ServoAxis {
     fn default() -> Self {
         Self::X
@@ -35,10 +42,8 @@ pub struct ServoConfiguration {
     pub position_p: f32,
     pub position_i: f32,
     pub position_d: f32,
-    pub velocity_p: f32,
-    pub velocity_i: f32,
     pub duty_cycle_limit: f32,
-    pub max_velocity: f32,
+    /// Reverses the brushed H-bridge polarity for this physical motor.
     pub reverse_motor: bool,
 }
 
@@ -50,10 +55,7 @@ impl Default for ServoConfiguration {
             position_p: 0.02,
             position_i: 0.0,
             position_d: 0.0,
-            velocity_p: 0.0,
-            velocity_i: 0.0,
             duty_cycle_limit: 0.75,
-            max_velocity: 0.0,
             reverse_motor: false,
         }
     }
@@ -68,11 +70,18 @@ pub struct ServoCalibrationState {
     pub detected_x: bool,
     pub detected_y: bool,
     pub test_running: bool,
+    /// Devices found by the latest CAN discovery scan.
+    pub discovered_devices: Vec<ServoDeviceId>,
+    /// The device currently assigned to each TVC axis, if any.
+    pub x_device: Option<ServoDeviceId>,
+    pub y_device: Option<ServoDeviceId>,
+    pub test_result_revision: u32,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ServoTestSample {
-    pub time_ms: u16,
+    /// Capture timestamp relative to the commanded step, in microseconds.
+    pub time_us: u32,
     pub position: f32,
 }
 
@@ -81,6 +90,13 @@ pub struct ServoTestResult {
     pub axis: ServoAxis,
     pub configuration: ServoConfiguration,
     pub samples: Vec<ServoTestSample>,
+}
+
+/// Messages carried by the persistent UI WebSocket.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub enum SocketMessage {
+    State(State),
+    TestResult(ServoTestResult),
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -141,12 +157,6 @@ pub struct BarometerState {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub enum ServoCommand {
-    Disable,
-    Update { servo1: f32, servo2: f32 },
-}
-
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Reset,
     SetWifi {
@@ -158,9 +168,6 @@ pub enum Command {
         r: u8,
         g: u8,
         b: u8,
-    },
-    ServoCommand {
-        command: ServoCommand,
     },
     TestServo {
         servo_id: u8,
@@ -185,6 +192,11 @@ pub enum Command {
     },
     StartServoPerformanceTest {
         axis: ServoAxis,
+        configuration: ServoConfiguration,
+    },
+    AssignServoDevice {
+        axis: ServoAxis,
+        device: ServoDeviceId,
     },
     SaveServoConfigurations,
 }
