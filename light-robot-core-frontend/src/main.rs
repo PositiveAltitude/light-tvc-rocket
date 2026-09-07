@@ -448,7 +448,7 @@ fn FlightDashboard() -> Html {
                 <div class="imu-status">{if imu.present { "ONLINE — 100 HZ ACQUISITION" } else { "OFFLINE — CHECK I²C SENSOR" }}</div>
                 <div class="imu-reading"><span>{"ACCELERATION (M/S²)"}</span><code>{format_axis(&imu.acceleration_mps2)}</code></div>
                 <div class="imu-reading"><span>{"ANGULAR VELOCITY (RAD/S)"}</span><code>{format_axis(&imu.angular_velocity_radps)}</code></div>
-                <small>{format!("{} successful samples", imu.sample_count)}</small>
+                <small>{format!("{} successful samples · average {:.1} Hz", imu.sample_count, imu.average_rate_hz)}</small>
             </Card>
         </>
     }

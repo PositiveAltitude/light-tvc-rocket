@@ -170,6 +170,8 @@ pub struct ImuState {
     pub angular_velocity_radps: [f32; 3],
     /// Monotonically wrapping count of successful 100 Hz samples.
     pub sample_count: u32,
+    /// Average successful host acquisition rate since the last IMU initialization.
+    pub average_rate_hz: f32,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

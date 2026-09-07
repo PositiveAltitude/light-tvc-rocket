@@ -3,6 +3,7 @@ use std::io;
 use std::io::ErrorKind;
 
 use anyhow::{Error, Result};
+use esp_idf_hal::cpu::Core;
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::io::EspIOError;
 use esp_idf_svc::http::server::ws::EspHttpWsDetachedSender;
@@ -10,6 +11,7 @@ use esp_idf_svc::http::server::{Connection, EspHttpServer, Request};
 use esp_idf_svc::ws::FrameType;
 use esp_idf_sys::EspError;
 use include_dir::{include_dir, Dir};
+use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -197,6 +199,16 @@ impl Server {
 
         let ws_state = state.clone();
         let ws_test_data = test_data.clone();
+        let default_publisher_thread_config =
+            esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
+        esp_idf_hal::task::thread::ThreadSpawnConfiguration {
+            name: Some(CStr::from_bytes_with_nul(b"state-publisher\0").unwrap()),
+            stack_size: 16 * 1024,
+            pin_to_core: Some(Core::Core0),
+            ..Default::default()
+        }
+        .set()
+        .unwrap();
         thread::spawn(move || {
             let mut sent_test_revision = 0;
             loop {
@@ -224,6 +236,9 @@ impl Server {
                 }
             }
         });
+        if let Some(default_publisher_thread_config) = default_publisher_thread_config {
+            default_publisher_thread_config.set()?;
+        }
 
         let f = DIST.get_file("index.html").unwrap();
         serve_file(&mut server, "", f.contents())?;

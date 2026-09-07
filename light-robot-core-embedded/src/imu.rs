@@ -85,6 +85,7 @@ impl Imu {
                 axis(10) * GYRO_SCALE_RADPS,
             ],
             sample_count,
+            average_rate_hz: 0.0,
         })
     }
 }
