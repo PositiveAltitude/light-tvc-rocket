@@ -1,0 +1,6 @@
+[toolchain]
+# The frontend is WebAssembly, not Xtensa firmware. Keeping this nested override
+# prevents Trunk (invoked from the embedded build script) from using the ESP
+# compiler fork for wasm32-unknown-unknown.
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]

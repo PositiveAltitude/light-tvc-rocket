@@ -10,7 +10,13 @@ name = "light-robot-core-embeded"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
+# ESP Rust 1.93.0.0 / LLVM 20 predates the Xtensa LLVM 21 PCREL_WRAPPER
+# regression, so normal size optimization is safe again.
 opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
