@@ -38,10 +38,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const WIFI_CONFIGURATION_NVS_KEY: &str = "wifi";
-const BMP_280_FILTER_GAIN: f32 = 0.05f32;
 const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
 const SERVO_TEST_CAPTURE_MS: u64 = 250;
 const INERTIA_CAPTURE_DURATION: Duration = Duration::from_secs(5);
+const ORIENTATION_CHECK_MAX_COMMAND: f32 = 0.75;
+const ORIENTATION_CHECK_PERIOD: Duration = Duration::from_millis(20);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 
@@ -51,6 +52,97 @@ fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: 
         * configuration.max_turn_degrees.max(0.01)
         * position.clamp(-1.0, 1.0)) as i32;
     (configuration.zero_encoder_count as i32 + delta).rem_euclid(ENCODER_COUNTS_PER_TURN) as u16
+}
+
+/// Applies the flight-controller-level direction setting. `reverse_motor`
+/// remains a servo-firmware configuration and is intentionally not used here.
+fn flight_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
+    normalized_position_to_encoder(
+        configuration,
+        if configuration.reverse_control {
+            -position
+        } else {
+            position
+        },
+    )
+}
+
+/// Keep the configuration protocol work out of the flight-control loop's stack
+/// frame. `api_encode` uses temporary bincode buffers, so this must not be
+/// inlined into the already large CAN task.
+#[inline(never)]
+fn apply_servo_configuration(
+    can: &mut CanDriver<'static>,
+    axis: ServoAxis,
+    address: u16,
+    configuration: &ServoConfiguration,
+) {
+    let axis_name = match axis {
+        ServoAxis::X => "X",
+        ServoAxis::Y => "Y",
+    };
+    let transmit = |command: ServoCommandFrame| {
+        let data = command.api_encode().unwrap();
+        let frame = Frame::new(address as u32, EnumSet::new(), data.as_slice()).unwrap();
+        let _ = can.transmit(&frame, 10);
+    };
+    info!(
+        "flight-control: {} axis config (CAN {}): data rate",
+        axis_name, address
+    );
+    transmit(ServoCommandFrame::SetDataRate { data_rate: 1000 });
+    info!("flight-control: {} axis config: motor settings", axis_name);
+    transmit(ServoCommandFrame::SetGeneralConfig1 {
+        reverse_motor: configuration.reverse_motor,
+        duty_cycle_limit: configuration.duty_cycle_limit,
+    });
+    info!("flight-control: {} axis config: position P", axis_name);
+    transmit(ServoCommandFrame::SetPositionPGain {
+        p: configuration.position_p,
+    });
+    info!("flight-control: {} axis config: position I", axis_name);
+    transmit(ServoCommandFrame::SetPositionIGain {
+        i: configuration.position_i,
+        cycles_to_max_out: 1000,
+    });
+    info!("flight-control: {} axis config: position D", axis_name);
+    transmit(ServoCommandFrame::SetPositionDGain {
+        d: configuration.position_d,
+    });
+    info!("flight-control: {} axis config: complete", axis_name);
+}
+
+/// Selects a servo by its persistent identity and restores its logical CAN
+/// channel. Channel assignments live in the servo and must be repeated after
+/// the servo controller powers up.
+#[inline(never)]
+fn assign_servo_channel(
+    can: &mut CanDriver<'static>,
+    axis: ServoAxis,
+    master: u16,
+    slave: u16,
+    device: &ServoDeviceId,
+) {
+    let transmit = |command: GeneralCommandFrame| {
+        let data = command.api_encode().unwrap();
+        let frame = Frame::new(0, EnumSet::new(), data.as_slice()).unwrap();
+        let _ = can.transmit(&frame, 10);
+    };
+    let axis_name = match axis {
+        ServoAxis::X => "X",
+        ServoAxis::Y => "Y",
+    };
+    info!(
+        "flight-control: assigning saved {} axis device to CAN {}/{}",
+        axis_name, master, slave
+    );
+    transmit(GeneralCommandFrame::ChipID1 {
+        chip_id1: device.chip_id1,
+    });
+    transmit(GeneralCommandFrame::ChipID2 {
+        chip_id2: device.chip_id2,
+    });
+    transmit(GeneralCommandFrame::SetChannel { master, slave });
 }
 
 fn encoder_to_normalized_position(configuration: &ServoConfiguration, encoder: u16) -> f32 {
@@ -82,6 +174,8 @@ enum CalibrationAction {
     Position(ServoAxis, f32),
     StartTest(ServoAxis),
     AssignDevice(ServoAxis, ServoDeviceId),
+    StopOrientationCheck,
+    RestartFlightController,
     Save,
 }
 
@@ -185,40 +279,6 @@ fn main() -> ! {
     info!("SOC: {:.2}", max17048.soc().unwrap());
     info!("MAX -- OK");
 
-    // let bmp280 = bmp280_ehal::BMP280::new(shared_i2c.acquire_i2c())?;
-    // let bmp280 = Arc::new(Mutex::new(bmp280));
-
-    // thread::spawn(move || {
-    //     loop {
-    //         thread::sleep(Duration::from_millis(20));
-    //         let mut bmp280 = bmp280.lock().unwrap();
-    //         let temperature: f32  = bmp280.temp() as f32;
-    //         let p0 = 101325f32;
-    //         let pressure: f32 = bmp280.pressure_one_shot() as f32;
-    //         //-44330f32 * (1f32 - f32::powf  (pressure / 101325f32).po powf(1f32/5.255f32));
-    //         let altitude: f32 = -8435.775 * (pressure / p0 - 1f32);
-    //         let mut state = state_.lock().unwrap();
-    //         let new_altitude = state.barometer.altitude +
-    //             (altitude - state.barometer.altitude) * BMP_280_FILTER_GAIN;
-    //         state.barometer.temperature = temperature;
-    //         state.barometer.altitude = new_altitude;
-    //     }
-    // });
-
-    // let mut adc_driver = esp_idf_hal::adc::oneshot::AdcDriver::new(peripherals.adc1).unwrap();
-    // let mut adc_channel_driver = esp_idf_hal::adc::oneshot::AdcChannelDriver::new(&adc_driver, peripherals.pins.gpio1, &adc_channel_config).unwrap();
-
-    // thread::spawn(move || {
-    //     loop {
-    //         thread::sleep(Duration::from_millis(1000));
-    //         let adc_reading = adc_channel_driver.read().unwrap();
-    //         let voltage = adc_reading as f32;
-    //         let mut state = state2.lock().unwrap();
-    //         state.pyro.channel1.test_voltage = voltage / 1000f32;
-    //     }
-    // });
-
-    //Drivers
     let mut led_driver: LedDriver<'static> =
         LedDriver::new(peripherals.pins.gpio8, peripherals.rmt.channel0).unwrap();
     info!("LED -- OK");
@@ -265,7 +325,9 @@ fn main() -> ! {
     let wifi_state = state.clone();
     let command_handler = move |c: &api::Command| -> anyhow::Result<()> {
         match c {
-            Command::Reset => {}
+            Command::Reset => {
+                *calibration_action_.lock().unwrap() = CalibrationAction::RestartFlightController
+            }
             Command::SetWifi { ssid, password } => {
                 anyhow::ensure!(!ssid.is_empty(), "Wi-Fi network name cannot be empty");
                 anyhow::ensure!(
@@ -348,6 +410,27 @@ fn main() -> ! {
             Command::SaveServoConfigurations => {
                 *calibration_action_.lock().unwrap() = CalibrationAction::Save
             }
+            Command::SetServoOrientationCheck { running } => {
+                let mut calibration = calibration_state.lock().unwrap();
+                if *running {
+                    anyhow::ensure!(
+                        calibration.imu.present,
+                        "cannot start servo orientation check while the IMU is offline"
+                    );
+                    anyhow::ensure!(
+                        !calibration.servo_calibration.test_running,
+                        "cannot start servo orientation check during a performance test"
+                    );
+                }
+                calibration.servo_calibration.orientation_check_running = *running;
+                if *running {
+                    calibration.servo_calibration.x_enabled = true;
+                    calibration.servo_calibration.y_enabled = true;
+                } else {
+                    calibration.servo_calibration.orientation_check_command = [0.0; 2];
+                    *calibration_action_.lock().unwrap() = CalibrationAction::StopOrientationCheck;
+                }
+            }
             Command::StartInertiaCapture => {
                 // Ignore duplicate clicks while the previous five-second
                 // capture is running; the sampler consumes this request.
@@ -380,7 +463,6 @@ fn main() -> ! {
                 }
             }
 
-            Command::ResetNvs => {}
             Command::TestServo { .. } => {}
         }
         Ok(())
@@ -534,38 +616,65 @@ fn main() -> ! {
     // Keep deterministic flight-control work off the core that runs Wi-Fi and
     // ESP-IDF's HTTP server. The task owns CAN and IMU polling together, so it
     // can update the shared state without cross-task control handoffs.
+    //
+    // `twai_driver_install` performs ESP-IDF driver setup synchronously. Do
+    // that from the startup task, then transfer the unopened driver to the
+    // dedicated CAN owner below. This keeps the install path out of the
+    // FreeRTOS control task where ESP-IDF's stack canary has reported faults.
+    info!("Startup: constructing CAN driver");
+    let rs_pin = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio1).unwrap();
+    let filter = esp_idf_hal::can::config::Filter::standard_allow_all();
+    let timing = esp_idf_hal::can::config::Timing::B1M;
+    let mode = esp_idf_hal::can::config::Mode::Normal;
+    let can_configuration = esp_idf_hal::can::config::Config::new()
+        .filter(filter)
+        .timing(timing)
+        .mode(mode);
+    let can = esp_idf_hal::can::CanDriver::new(
+        peripherals.can,
+        peripherals.pins.gpio43,
+        peripherals.pins.gpio2,
+        &can_configuration,
+    )
+    .unwrap();
+    info!("Startup: CAN driver constructed");
+
     let default_flight_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
     esp_idf_hal::task::thread::ThreadSpawnConfiguration {
         name: Some(CStr::from_bytes_with_nul(b"flight-control\0").unwrap()),
-        stack_size: 32 * 1024,
+        // CAN discovery, startup configuration, and protocol encoding all run
+        // here. Keep headroom for their nested temporary buffers on ESP-IDF.
+        stack_size: 64 * 1024,
+        // `esp_pthread_set_cfg` configures the spawning task; the child only
+        // receives it when inheritance is explicitly enabled.
+        inherit: true,
         pin_to_core: Some(Core::Core1),
         ..Default::default()
     }
     .set()
     .unwrap();
     thread::spawn(move || {
-        let mut rs_pin = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio1).unwrap();
+        info!("flight-control: task entered");
+        if let Some(configuration) = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get() {
+            info!(
+                "flight-control: runtime stack configuration: {} bytes, inherit={}",
+                configuration.stack_size, configuration.inherit
+            );
+        } else {
+            info!("flight-control: runtime stack configuration is unavailable");
+        }
+        // Keep the transceiver-enable pin configured for this task's lifetime.
+        let mut rs_pin = rs_pin;
         rs_pin.set_low().unwrap();
+        info!("flight-control: CAN transceiver enabled");
 
-        let filter = esp_idf_hal::can::config::Filter::standard_allow_all();
-
-        let timing = esp_idf_hal::can::config::Timing::B1M;
-        let mode = esp_idf_hal::can::config::Mode::Normal;
-        let config = esp_idf_hal::can::config::Config::new()
-            .filter(filter)
-            .timing(timing)
-            .mode(mode);
-        let mut can = esp_idf_hal::can::CanDriver::new(
-            peripherals.can,
-            peripherals.pins.gpio43,
-            peripherals.pins.gpio2,
-            &config,
-        )
-        .unwrap();
+        let mut can = can;
 
         can.start().unwrap();
+        info!("flight-control: CAN driver started");
 
         FreeRtos::delay_ms(1000);
+        info!("flight-control: initial CAN settle complete");
 
         info!("START!!!");
 
@@ -588,12 +697,10 @@ fn main() -> ! {
 
         //read all servos
         {
-            info!("Servo auth started");
+            info!("flight-control: servo discovery started");
             can.can_transmit(0, &GeneralCommandFrame::RequestChipId1);
 
             let mut chip_id1s = HashSet::new();
-
-            let mut channel_index = 100;
 
             let timestamp = Instant::now();
 
@@ -617,6 +724,7 @@ fn main() -> ! {
             }
 
             for chip_id1 in chip_id1s {
+                info!("flight-control: requesting second half of servo identity");
                 let data_vec = GeneralCommandFrame::RequestChipId2 { chip_id1 }
                     .api_encode()
                     .unwrap();
@@ -644,61 +752,14 @@ fn main() -> ! {
                         break;
                     }
                 }
-
-                // for chip_id2 in chip_id2s {
-                //     let data_vec = GeneralCommandFrame::ChipID1 { chip_id1 }
-                //         .api_encode()
-                //         .unwrap();
-                //     let data = data_vec.as_slice();
-                //     let frame = Frame::new(0, EnumSet::new(), data).unwrap();
-                //     can.transmit(&frame, 10).unwrap();
-                //     info!("T! id:{:} data:{:?}", frame.identifier(), frame.data());
-                //     thread::sleep(Duration::from_millis(2));
-                //
-                //     let data_vec = GeneralCommandFrame::ChipID2 { chip_id2 }
-                //         .api_encode()
-                //         .unwrap();
-                //     let data = data_vec.as_slice();
-                //     let frame = Frame::new(0, EnumSet::new(), data).unwrap();
-                //     can.transmit(&frame, 10).unwrap();
-                //     info!("T! id:{:} data:{:?}", frame.identifier(), frame.data());
-                //     thread::sleep(Duration::from_millis(2));
-                //
-                //     let data_vec = GeneralCommandFrame::SetChannel {
-                //         master: channel_index,
-                //         slave: channel_index + 1,
-                //     }
-                //     .api_encode()
-                //     .unwrap();
-                //     let data = data_vec.as_slice();
-                //     let frame = Frame::new(0, EnumSet::new(), data).unwrap();
-                //     can.transmit(&frame, 10).unwrap();
-                //     info!("T! id:{:} data:{:?}", frame.identifier(), frame.data());
-                //     thread::sleep(Duration::from_millis(2));
-                //
-                //     let data_vec = ServoCommandFrame::SetLedConstant {
-                //         r: 100,
-                //         g: 100,
-                //         b: 100,
-                //     }
-                //     .api_encode()
-                //     .unwrap();
-                //     let data = data_vec.as_slice();
-                //     let frame = Frame::new(channel_index as u32, EnumSet::new(), data).unwrap();
-                //     info!("T! id:{:} data:{:?}", frame.identifier(), frame.data());
-                //     can.transmit(&frame, 10).unwrap();
-                //
-                //     channel_index = channel_index + 2;
-                //     devices_connected += 1;
-                // }
             }
-            info!("Servos detected:");
+            info!("flight-control: servo discovery completed; devices detected:");
             for chip_id in chip_ids.iter() {
                 info!("{:?}", chip_id);
             }
         }
 
-        info!("Servo detection END");
+        info!("flight-control: publishing discovered devices");
         state.lock().unwrap().servo_calibration.discovered_devices = chip_ids
             .iter()
             .map(|(chip_id1, chip_id2)| ServoDeviceId {
@@ -706,13 +767,61 @@ fn main() -> ! {
                 chip_id2: *chip_id2,
             })
             .collect();
+        info!("flight-control: discovered-device state published");
 
         let servo1_address_master = 2u16;
         let servo1_address_slave = 12u16;
         let servo2_address_master = 3u16;
         let servo2_address_slave = 13u16;
 
+        info!("flight-control: copying NVS-loaded servo configuration");
+        // The state was populated from NVS before CAN was initialized. Apply
+        // both saved axis configurations now that the servo addresses exist.
+        let startup_configuration = state.lock().unwrap().servo_calibration.clone();
+        for (axis, master, slave, assigned_device) in [
+            (
+                ServoAxis::X,
+                servo1_address_master,
+                servo1_address_slave,
+                startup_configuration.x_device.as_ref(),
+            ),
+            (
+                ServoAxis::Y,
+                servo2_address_master,
+                servo2_address_slave,
+                startup_configuration.y_device.as_ref(),
+            ),
+        ] {
+            if let Some(device) = assigned_device {
+                if startup_configuration.discovered_devices.contains(device) {
+                    assign_servo_channel(&mut can, axis, master, slave, device);
+                } else {
+                    info!(
+                        "flight-control: saved {} axis device is not present; channel not assigned",
+                        if axis == ServoAxis::X { "X" } else { "Y" }
+                    );
+                }
+            }
+        }
+        info!("flight-control: applying saved X-axis configuration");
+        apply_servo_configuration(
+            &mut can,
+            ServoAxis::X,
+            servo1_address_master,
+            &startup_configuration.x,
+        );
+        info!("flight-control: applying saved Y-axis configuration");
+        apply_servo_configuration(
+            &mut can,
+            ServoAxis::Y,
+            servo2_address_master,
+            &startup_configuration.y,
+        );
+        info!("flight-control: saved servo configurations applied to both servos");
+
         let test_data_ = test_data.clone();
+        let mut last_orientation_command_at = Instant::now() - ORIENTATION_CHECK_PERIOD;
+        info!("flight-control: entering CAN service loop");
         loop {
             let action = std::mem::replace(
                 &mut *calibration_action.lock().unwrap(),
@@ -762,19 +871,7 @@ fn main() -> ! {
                     } else {
                         (servo2_address_master, servo2_address_slave)
                     };
-                    can.can_transmit(
-                        0,
-                        &GeneralCommandFrame::ChipID1 {
-                            chip_id1: device.chip_id1,
-                        },
-                    );
-                    can.can_transmit(
-                        0,
-                        &GeneralCommandFrame::ChipID2 {
-                            chip_id2: device.chip_id2,
-                        },
-                    );
-                    can.can_transmit(0, &GeneralCommandFrame::SetChannel { master, slave });
+                    assign_servo_channel(&mut can, axis, master, slave, &device);
                     let mut state = state_.lock().unwrap();
                     if axis == ServoAxis::X {
                         state.servo_calibration.x_device = Some(device);
@@ -782,42 +879,30 @@ fn main() -> ! {
                         state.servo_calibration.y_device = Some(device);
                     }
                 }
+                CalibrationAction::StopOrientationCheck => {
+                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable);
+                    can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
+                    let mut state = state_.lock().unwrap();
+                    state.servo_calibration.x_enabled = false;
+                    state.servo_calibration.y_enabled = false;
+                    info!("Servo orientation check stopped; both servos disabled");
+                }
+                CalibrationAction::RestartFlightController => {
+                    // CAN is owned by this task, so disable both axes before
+                    // restarting rather than leaving their last hold target
+                    // active during boot.
+                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable);
+                    can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
+                    FreeRtos::delay_ms(20);
+                    esp_idf_hal::reset::restart();
+                }
                 CalibrationAction::Apply(axis, configuration) => {
                     let address = if axis == ServoAxis::X {
                         servo1_address_master
                     } else {
                         servo2_address_master
                     };
-                    can.can_transmit(
-                        address as u32,
-                        &ServoCommandFrame::SetDataRate { data_rate: 1000 },
-                    );
-                    can.can_transmit(
-                        address as u32,
-                        &ServoCommandFrame::SetGeneralConfig1 {
-                            reverse_motor: configuration.reverse_motor,
-                            duty_cycle_limit: configuration.duty_cycle_limit,
-                        },
-                    );
-                    can.can_transmit(
-                        address as u32,
-                        &ServoCommandFrame::SetPositionPGain {
-                            p: configuration.position_p,
-                        },
-                    );
-                    can.can_transmit(
-                        address as u32,
-                        &ServoCommandFrame::SetPositionIGain {
-                            i: configuration.position_i,
-                            cycles_to_max_out: 1000,
-                        },
-                    );
-                    can.can_transmit(
-                        address as u32,
-                        &ServoCommandFrame::SetPositionDGain {
-                            d: configuration.position_d,
-                        },
-                    );
+                    apply_servo_configuration(&mut can, axis, address, &configuration);
                 }
                 CalibrationAction::CaptureZero(axis) => {
                     let position = if axis == ServoAxis::X {
@@ -965,7 +1050,15 @@ fn main() -> ! {
                     info!("Servo step-response test finished");
                 }
                 CalibrationAction::Save => {
-                    match serde_json::to_vec(&state_.lock().unwrap().servo_calibration) {
+                    // Runtime actuation flags are deliberately not persistent:
+                    // a reboot must never resume a motor test or hold position.
+                    let mut configuration = state_.lock().unwrap().servo_calibration.clone();
+                    configuration.x_enabled = false;
+                    configuration.y_enabled = false;
+                    configuration.test_running = false;
+                    configuration.orientation_check_running = false;
+                    configuration.orientation_check_command = [0.0; 2];
+                    match serde_json::to_vec(&configuration) {
                         Ok(bytes) => match servo_nvs.lock().unwrap().set_blob("axes", &bytes) {
                             Ok(()) => info!("Servo configuration saved to NVS flash"),
                             Err(error) => info!("Unable to save servo configuration: {:?}", error),
@@ -974,68 +1067,66 @@ fn main() -> ! {
                     }
                 }
             }
-            /*
-                    // Historic test implementation intentionally retained as documentation only.
-                    // let zero_servo1 = 4096i16 + 1358;
-                    //
-                    //
-                    // let max_servo1 = (4096 * 5 * 116 / 360 / 8) as f32;
-                    //
-                    // can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
-                    //
-                    // can.can_transmit(
-                    //     servo1_address_master as u32,
-                    //     &ServoCommandFrame::HoldPosition {
-                    //         setpoint: ((zero_servo1 + (max_servo1 * start) as i16) % 4096) as u16,
-                    //     },
-                    // );
-                    //
-                    // let timestamp = Instant::now();
-                    //
-                    // while timestamp.elapsed().as_millis() < 2000 {
-                    //     match can.receive(0) {
-                    //         Ok(_) => {}
-                    //         Err(_) => {}
-                    //     }
-                    // }
-                    //
-                    // let mut test_data = test_data_.lock().unwrap();
-                    // test_data.data.clear();
-                    //
-                    // let timestamp = Instant::now();
-                    //
-                    // can.can_transmit(
-                    //     servo1_address_master as u32,
-                    //     &ServoCommandFrame::HoldPosition {
-                    //         setpoint: ((zero_servo1 + (max_servo1 * end) as i16) % 4096) as u16,
-                    //     },
-                    // );
-                    //
-                    // while timestamp.elapsed().as_millis() < 1000 {
-                    //     match can.receive(0) {
-                    //         Ok(frame) => {
-                    //             if frame.identifier() == servo1_address_slave as u32 {
-                    //                 match ServoResponseFrame::api_decode(frame.data()).unwrap() {
-                    //                     ServoResponseFrame::State {
-                    //                         sensor_detected,
-                    //                         position,
-                    //                         velocity,
-                    //                         current,
-                    //                     } => {
-                    //                         test_data.data.push((
-                    //                             timestamp.elapsed().as_millis() as u16,
-                    //                             position,
-                    //                         ));
-                    //                     }
-                    //                 }
-                    //             }
-                    //         }
-                    //         Err(_) => {}
-                    //     }
-                    // }
 
-            */
-
+            // While the horizontal rocket is rolled around its cylindrical Z
+            // axis, gravity appears in the IMU X/Y plane. Command each TVC axis
+            // from that vector, then let the FC-level per-axis reversal correct
+            // a mechanically mirrored installation.
+            if last_orientation_command_at.elapsed() >= ORIENTATION_CHECK_PERIOD {
+                let (orientation, stop_for_imu) = {
+                    let mut state = state_.lock().unwrap();
+                    if state.servo_calibration.orientation_check_running && state.imu.present {
+                        let command = [
+                            (state.imu.acceleration_mps2[0] / 9.80665).clamp(-1.0, 1.0)
+                                * ORIENTATION_CHECK_MAX_COMMAND,
+                            (state.imu.acceleration_mps2[1] / 9.80665).clamp(-1.0, 1.0)
+                                * ORIENTATION_CHECK_MAX_COMMAND,
+                        ];
+                        (
+                            Some((
+                                command,
+                                state.servo_calibration.x.clone(),
+                                state.servo_calibration.y.clone(),
+                            )),
+                            false,
+                        )
+                    } else {
+                        let should_stop = state.servo_calibration.orientation_check_running;
+                        if should_stop {
+                            state.servo_calibration.orientation_check_running = false;
+                            state.servo_calibration.orientation_check_command = [0.0; 2];
+                            state.servo_calibration.x_enabled = false;
+                            state.servo_calibration.y_enabled = false;
+                            info!("Servo orientation check stopped because the IMU is offline");
+                        }
+                        (None, should_stop)
+                    }
+                };
+                if stop_for_imu {
+                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable);
+                    can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
+                }
+                if let Some((command, x_configuration, y_configuration)) = orientation {
+                    can.can_transmit(
+                        servo1_address_master as u32,
+                        &ServoCommandFrame::BrushedHoldPosition {
+                            position: flight_position_to_encoder(&x_configuration, command[0]),
+                        },
+                    );
+                    can.can_transmit(
+                        servo2_address_master as u32,
+                        &ServoCommandFrame::BrushedHoldPosition {
+                            position: flight_position_to_encoder(&y_configuration, command[1]),
+                        },
+                    );
+                    state_
+                        .lock()
+                        .unwrap()
+                        .servo_calibration
+                        .orientation_check_command = command;
+                }
+                last_orientation_command_at = Instant::now();
+            }
             let can_receive_result = can.receive(0);
 
             match can_receive_result {
