@@ -440,22 +440,53 @@ struct PendulumFit {
 impl PendulumFit {
     fn from_capture(result: &InertiaCaptureResult, mass_g: f64, offset_mm: f64) -> Option<Self> {
         let axis = result.dominant_axis?;
-        if result.samples.len() < 8 || mass_g <= 0.0 || offset_mm <= 0.0 { return None; }
+        if result.samples.len() < 8 || mass_g <= 0.0 || offset_mm <= 0.0 {
+            return None;
+        }
         let values = result.samples.iter().map(|sample| if axis == InertiaAxis::X { sample.gyro_x_radps } else { sample.gyro_y_radps } as f64).collect::<Vec<_>>();
         let min = values.iter().copied().fold(f64::INFINITY, f64::min);
         let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let bias = (min + max) * 0.5;
         let omega_amplitude = ((max - min) * 0.5).max(0.01);
-        let crossings = result.samples.windows(2).filter_map(|pair| {
-            let a = (if axis == InertiaAxis::X { pair[0].gyro_x_radps } else { pair[0].gyro_y_radps }) as f64 - bias;
-            let b = (if axis == InertiaAxis::X { pair[1].gyro_x_radps } else { pair[1].gyro_y_radps }) as f64 - bias;
-            if a.signum() != b.signum() && (a - b).abs() > f64::EPSILON {
-                let fraction = a.abs() / (a.abs() + b.abs());
-                Some((pair[0].time_us as f64 + fraction * (pair[1].time_us - pair[0].time_us) as f64) / 1_000_000.0)
-            } else { None }
-        }).collect::<Vec<_>>();
-        let half_period = crossings.windows(2).map(|pair| pair[1] - pair[0]).filter(|period| *period > 0.001).sum::<f64>() / (crossings.len().saturating_sub(1).max(1) as f64);
-        let frequency_hz = if crossings.len() > 1 { 1.0 / (2.0 * half_period) } else { 1.0 };
+        let crossings = result
+            .samples
+            .windows(2)
+            .filter_map(|pair| {
+                let a = (if axis == InertiaAxis::X {
+                    pair[0].gyro_x_radps
+                } else {
+                    pair[0].gyro_y_radps
+                }) as f64
+                    - bias;
+                let b = (if axis == InertiaAxis::X {
+                    pair[1].gyro_x_radps
+                } else {
+                    pair[1].gyro_y_radps
+                }) as f64
+                    - bias;
+                if a.signum() != b.signum() && (a - b).abs() > f64::EPSILON {
+                    let fraction = a.abs() / (a.abs() + b.abs());
+                    Some(
+                        (pair[0].time_us as f64
+                            + fraction * (pair[1].time_us - pair[0].time_us) as f64)
+                            / 1_000_000.0,
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let half_period = crossings
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .filter(|period| *period > 0.001)
+            .sum::<f64>()
+            / (crossings.len().saturating_sub(1).max(1) as f64);
+        let frequency_hz = if crossings.len() > 1 {
+            1.0 / (2.0 * half_period)
+        } else {
+            1.0
+        };
         let natural_omega = (2.0 * std::f64::consts::PI * frequency_hz).max(0.1);
         let mass_kg = mass_g / 1000.0;
         let offset_m = offset_mm / 1000.0;
@@ -463,31 +494,60 @@ impl PendulumFit {
         // A zero crossing identifies phase only modulo π: either the positive
         // or negative angular-velocity half-cycle could pass through it. Try
         // both branches against the full capture before optimization.
-        let phase = crossings.first().map(|time| -natural_omega * *time).unwrap_or(0.0);
-        let envelope_peaks = values.windows(3).enumerate().filter_map(|(index, window)| {
-            let center = (window[1] - bias).abs();
-            if center >= (window[0] - bias).abs() && center >= (window[2] - bias).abs() {
-                Some((index + 1, center))
-            } else { None }
-        }).collect::<Vec<_>>();
+        let phase = crossings
+            .first()
+            .map(|time| -natural_omega * *time)
+            .unwrap_or(0.0);
+        let envelope_peaks = values
+            .windows(3)
+            .enumerate()
+            .filter_map(|(index, window)| {
+                let center = (window[1] - bias).abs();
+                if center >= (window[0] - bias).abs() && center >= (window[2] - bias).abs() {
+                    Some((index + 1, center))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         let initial_damping = match (envelope_peaks.first(), envelope_peaks.last()) {
-            (Some((first_index, first_peak)), Some((last_index, last_peak))) if last_index > first_index && *last_peak > 0.001 => {
-                let elapsed = (result.samples[*last_index].time_us - result.samples[*first_index].time_us) as f64 / 1_000_000.0;
+            (Some((first_index, first_peak)), Some((last_index, last_peak)))
+                if last_index > first_index && *last_peak > 0.001 =>
+            {
+                let elapsed = (result.samples[*last_index].time_us
+                    - result.samples[*first_index].time_us) as f64
+                    / 1_000_000.0;
                 (2.0 * (first_peak / last_peak).ln() / elapsed.max(0.001)).clamp(0.001, 5.0)
             }
             _ => 0.02,
         };
         let mut fit = Self {
-            samples: result.samples.clone(), axis, mass_kg, offset_m,
-            coordinates: [inertia.ln(), (omega_amplitude / natural_omega).max(0.005).ln(), phase, bias, initial_damping.ln()],
-            cost: f64::INFINITY, learning_rate: 0.025, iterations: 0, finished: false,
+            samples: result.samples.clone(),
+            axis,
+            mass_kg,
+            offset_m,
+            coordinates: [
+                inertia.ln(),
+                (omega_amplitude / natural_omega).max(0.005).ln(),
+                phase,
+                bias,
+                initial_damping.ln(),
+            ],
+            cost: f64::INFINITY,
+            learning_rate: 0.025,
+            iterations: 0,
+            finished: false,
         };
         let mut opposite_phase = fit.coordinates;
         opposite_phase[2] += std::f64::consts::PI;
         let direct_cost = fit.cost_for(fit.coordinates);
         let opposite_cost = fit.cost_for(opposite_phase);
-        if opposite_cost < direct_cost { fit.coordinates = opposite_phase; fit.cost = opposite_cost; }
-        else { fit.cost = direct_cost; }
+        if opposite_cost < direct_cost {
+            fit.coordinates = opposite_phase;
+            fit.cost = opposite_cost;
+        } else {
+            fit.cost = direct_cost;
+        }
         Some(fit)
     }
 
@@ -507,62 +567,115 @@ impl PendulumFit {
         let mut theta = angle_amplitude * phase.cos();
         let mut omega = -angle_amplitude * natural_omega * phase.sin();
         let mut previous_time = 0.0;
-        self.samples.iter().map(|sample| {
-            let time = sample.time_us as f64 / 1_000_000.0;
-            let dt = (time - previous_time).max(0.0); previous_time = time;
-            let acceleration = |angle: f64, velocity: f64| -(self.mass_kg * 9.80665 * self.offset_m / inertia) * angle.sin() - damping * velocity;
-            let k1_theta = omega; let k1_omega = acceleration(theta, omega);
-            let k2_theta = omega + k1_omega * dt * 0.5; let k2_omega = acceleration(theta + k1_theta * dt * 0.5, omega + k1_omega * dt * 0.5);
-            let k3_theta = omega + k2_omega * dt * 0.5; let k3_omega = acceleration(theta + k2_theta * dt * 0.5, omega + k2_omega * dt * 0.5);
-            let k4_theta = omega + k3_omega * dt; let k4_omega = acceleration(theta + k3_theta * dt, omega + k3_omega * dt);
-            theta += dt * (k1_theta + 2.0 * k2_theta + 2.0 * k3_theta + k4_theta) / 6.0;
-            omega += dt * (k1_omega + 2.0 * k2_omega + 2.0 * k3_omega + k4_omega) / 6.0;
-            omega + bias
-        }).collect()
+        self.samples
+            .iter()
+            .map(|sample| {
+                let time = sample.time_us as f64 / 1_000_000.0;
+                let dt = (time - previous_time).max(0.0);
+                previous_time = time;
+                let acceleration = |angle: f64, velocity: f64| {
+                    -(self.mass_kg * 9.80665 * self.offset_m / inertia) * angle.sin()
+                        - damping * velocity
+                };
+                let k1_theta = omega;
+                let k1_omega = acceleration(theta, omega);
+                let k2_theta = omega + k1_omega * dt * 0.5;
+                let k2_omega =
+                    acceleration(theta + k1_theta * dt * 0.5, omega + k1_omega * dt * 0.5);
+                let k3_theta = omega + k2_omega * dt * 0.5;
+                let k3_omega =
+                    acceleration(theta + k2_theta * dt * 0.5, omega + k2_omega * dt * 0.5);
+                let k4_theta = omega + k3_omega * dt;
+                let k4_omega = acceleration(theta + k3_theta * dt, omega + k3_omega * dt);
+                theta += dt * (k1_theta + 2.0 * k2_theta + 2.0 * k3_theta + k4_theta) / 6.0;
+                omega += dt * (k1_omega + 2.0 * k2_omega + 2.0 * k3_omega + k4_omega) / 6.0;
+                omega + bias
+            })
+            .collect()
     }
 
     fn cost_for(&self, coordinates: [f64; 5]) -> f64 {
         let simulated = self.simulated(coordinates);
-        let cost = simulated.iter().zip(&self.samples).map(|(prediction, sample)| {
-            let measured = if self.axis == InertiaAxis::X { sample.gyro_x_radps } else { sample.gyro_y_radps } as f64;
-            let residual = prediction - measured;
-            if residual.is_finite() { residual * residual } else { 1e12 }
-        }).sum::<f64>() / simulated.len().max(1) as f64;
-        if cost.is_finite() { cost.min(1e12) } else { 1e12 }
+        let cost = simulated
+            .iter()
+            .zip(&self.samples)
+            .map(|(prediction, sample)| {
+                let measured = if self.axis == InertiaAxis::X {
+                    sample.gyro_x_radps
+                } else {
+                    sample.gyro_y_radps
+                } as f64;
+                let residual = prediction - measured;
+                if residual.is_finite() {
+                    residual * residual
+                } else {
+                    1e12
+                }
+            })
+            .sum::<f64>()
+            / simulated.len().max(1) as f64;
+        if cost.is_finite() {
+            cost.min(1e12)
+        } else {
+            1e12
+        }
     }
 
     fn iterate(&mut self) {
-        if self.finished { return; }
+        if self.finished {
+            return;
+        }
         let mut gradient = [0.0; 5];
         for index in 0..5 {
             let step = if index == 3 { 0.001 } else { 0.002 };
-            let mut plus = self.coordinates; plus[index] += step;
-            let mut minus = self.coordinates; minus[index] -= step;
+            let mut plus = self.coordinates;
+            plus[index] += step;
+            let mut minus = self.coordinates;
+            minus[index] -= step;
             gradient[index] = (self.cost_for(plus) - self.cost_for(minus)) / (2.0 * step);
         }
-        let norm = gradient.iter().map(|value| value * value).sum::<f64>().sqrt();
-        if self.iterations >= 900 { self.finished = true; return; }
+        let norm = gradient
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt();
+        if self.iterations >= 900 {
+            self.finished = true;
+            return;
+        }
         if !norm.is_finite() {
             // Keep the fit visible and retry with a smaller step rather than
             // silently reporting completion after a single unstable trial.
             self.learning_rate *= 0.5;
             self.iterations += 1;
-            if self.learning_rate < 1e-6 && self.iterations >= 120 { self.finished = true; }
+            if self.learning_rate < 1e-6 && self.iterations >= 120 {
+                self.finished = true;
+            }
             return;
         }
         if norm < 1e-10 {
             self.iterations += 1;
-            if self.iterations >= 120 { self.finished = true; }
+            if self.iterations >= 120 {
+                self.finished = true;
+            }
             return;
         }
         let mut candidate = self.coordinates;
-        for index in 0..5 { candidate[index] -= self.learning_rate * gradient[index] / norm; }
+        for index in 0..5 {
+            candidate[index] -= self.learning_rate * gradient[index] / norm;
+        }
         let candidate_cost = self.cost_for(candidate);
         if candidate_cost < self.cost {
-            self.coordinates = candidate; self.cost = candidate_cost; self.learning_rate = (self.learning_rate * 1.04).min(0.1);
-        } else { self.learning_rate *= 0.5; }
+            self.coordinates = candidate;
+            self.cost = candidate_cost;
+            self.learning_rate = (self.learning_rate * 1.04).min(0.1);
+        } else {
+            self.learning_rate *= 0.5;
+        }
         self.iterations += 1;
-        if (self.learning_rate < 1e-5 && self.iterations >= 120) || self.iterations >= 900 { self.finished = true; }
+        if (self.learning_rate < 1e-5 && self.iterations >= 120) || self.iterations >= 900 {
+            self.finished = true;
+        }
     }
 }
 
@@ -585,7 +698,9 @@ fn MomentOfInertia() -> Html {
         use_effect_with_deps(
             move |message| {
                 if let Some(message) = &**message {
-                    if let Ok(SocketMessage::State(next_state)) = serde_json::from_str::<SocketMessage>(message) {
+                    if let Ok(SocketMessage::State(next_state)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
                         if !*configuration_loaded {
                             let mut loaded = next_state.inertia_configuration.clone();
                             loaded.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&loaded);
@@ -594,7 +709,9 @@ fn MomentOfInertia() -> Html {
                         }
                         state.set(next_state);
                     }
-                    if let Ok(SocketMessage::InertiaCaptureResult(next_result)) = serde_json::from_str::<SocketMessage>(message) {
+                    if let Ok(SocketMessage::InertiaCaptureResult(next_result)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
                         let next_fit = PendulumFit::from_capture(
                             &next_result,
                             configuration.mass_g as f64,
@@ -626,7 +743,9 @@ fn MomentOfInertia() -> Html {
                         }
                         fit.set(next);
                     }))
-                } else { None };
+                } else {
+                    None
+                };
                 move || drop(interval)
             },
             (fitting, fit_iteration),
@@ -637,44 +756,138 @@ fn MomentOfInertia() -> Html {
         Callback::from(move |_| send_command(&socket, Command::StartInertiaCapture))
     };
     {
-        let fit = fit.clone(); let configuration = configuration.clone(); let socket = socket.clone(); let published = published_fit_iteration.clone();
-        let completed_iteration = fit.as_ref().filter(|model| model.finished).map(|model| model.iterations);
-        use_effect_with_deps(move |completed_iteration| {
-            if let Some(iteration) = *completed_iteration {
-                if *published != Some(iteration) {
-                    if let Some(model) = fit.as_ref() {
-                        let mut next = (*configuration).clone();
-                        let index = if model.axis == InertiaAxis::X { 0 } else { 1 };
-                        next.moment_of_inertia_kgm2[index] = model.parameters(model.coordinates).0 as f32;
-                        next.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&next);
-                        configuration.set(next.clone());
-                        send_command(&socket, Command::SetInertiaConfiguration { configuration: next });
-                        published.set(Some(iteration));
+        let fit = fit.clone();
+        let configuration = configuration.clone();
+        let socket = socket.clone();
+        let published = published_fit_iteration.clone();
+        let completed_iteration = fit
+            .as_ref()
+            .filter(|model| model.finished)
+            .map(|model| model.iterations);
+        use_effect_with_deps(
+            move |completed_iteration| {
+                if let Some(iteration) = *completed_iteration {
+                    if *published != Some(iteration) {
+                        if let Some(model) = fit.as_ref() {
+                            let mut next = (*configuration).clone();
+                            let index = if model.axis == InertiaAxis::X { 0 } else { 1 };
+                            next.moment_of_inertia_kgm2[index] =
+                                model.parameters(model.coordinates).0 as f32;
+                            next.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&next);
+                            configuration.set(next.clone());
+                            send_command(
+                                &socket,
+                                Command::SetInertiaConfiguration {
+                                    configuration: next,
+                                },
+                            );
+                            published.set(Some(iteration));
+                        }
                     }
                 }
-            }
-            || ()
-        }, completed_iteration);
+                || ()
+            },
+            completed_iteration,
+        );
     }
-    let update_mass = { let configuration = configuration.clone(); Callback::from(move |event: InputEvent| { let mut next = (*configuration).clone(); next.mass_g = event.target_unchecked_into::<HtmlInputElement>().value().parse().unwrap_or(next.mass_g).max(0.0); next.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&next); configuration.set(next); }) };
-    let update_offset = { let configuration = configuration.clone(); Callback::from(move |event: InputEvent| { let mut next = (*configuration).clone(); next.center_of_mass_offset_mm = event.target_unchecked_into::<HtmlInputElement>().value().parse().unwrap_or(next.center_of_mass_offset_mm).max(0.0); configuration.set(next); }) };
-    let update_inertia = |index: usize| { let configuration = configuration.clone(); Callback::from(move |event: InputEvent| { let mut next = (*configuration).clone(); next.moment_of_inertia_kgm2[index] = event.target_unchecked_into::<HtmlInputElement>().value().parse().unwrap_or(next.moment_of_inertia_kgm2[index]).max(0.0); configuration.set(next); }) };
-    let save_configuration = { let configuration = configuration.clone(); let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::SaveInertiaConfiguration { configuration: (*configuration).clone() })) };
+    let update_mass = {
+        let configuration = configuration.clone();
+        Callback::from(move |event: InputEvent| {
+            let mut next = (*configuration).clone();
+            next.mass_g = event
+                .target_unchecked_into::<HtmlInputElement>()
+                .value()
+                .parse()
+                .unwrap_or(next.mass_g)
+                .max(0.0);
+            next.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&next);
+            configuration.set(next);
+        })
+    };
+    let update_offset = {
+        let configuration = configuration.clone();
+        Callback::from(move |event: InputEvent| {
+            let mut next = (*configuration).clone();
+            next.center_of_mass_offset_mm = event
+                .target_unchecked_into::<HtmlInputElement>()
+                .value()
+                .parse()
+                .unwrap_or(next.center_of_mass_offset_mm)
+                .max(0.0);
+            configuration.set(next);
+        })
+    };
+    let update_inertia = |index: usize| {
+        let configuration = configuration.clone();
+        Callback::from(move |event: InputEvent| {
+            let mut next = (*configuration).clone();
+            next.moment_of_inertia_kgm2[index] = event
+                .target_unchecked_into::<HtmlInputElement>()
+                .value()
+                .parse()
+                .unwrap_or(next.moment_of_inertia_kgm2[index])
+                .max(0.0);
+            configuration.set(next);
+        })
+    };
+    let save_configuration = {
+        let configuration = configuration.clone();
+        let socket = socket.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SaveInertiaConfiguration {
+                    configuration: (*configuration).clone(),
+                },
+            )
+        })
+    };
     let peak = result.samples.iter().fold(0.1_f32, |peak, sample| {
-        peak.max(sample.gyro_x_radps.abs()).max(sample.gyro_y_radps.abs())
+        peak.max(sample.gyro_x_radps.abs())
+            .max(sample.gyro_y_radps.abs())
     });
-    let duration_us = result.samples.last().map(|sample| sample.time_us.max(1)).unwrap_or(5_000_000);
-    let points = |x: bool| result.samples.iter().map(|sample| {
-        let horizontal = sample.time_us as f32 / duration_us as f32 * 600.0;
-        let value = if x { sample.gyro_x_radps } else { sample.gyro_y_radps };
-        format!("{:.1},{:.1}", horizontal, 130.0 - value / peak * 105.0)
-    }).collect::<Vec<_>>().join(" ");
-    let fitted = fit.as_ref().map(|model| model.simulated(model.coordinates)).unwrap_or_default();
-    let fitted_points = result.samples.iter().zip(fitted.iter()).map(|(sample, value)| {
-        let horizontal = sample.time_us as f32 / duration_us as f32 * 600.0;
-        format!("{:.1},{:.1}", horizontal, 130.0 - *value as f32 / peak * 105.0)
-    }).collect::<Vec<_>>().join(" ");
-    let fit_parameters = fit.as_ref().map(|model| model.parameters(model.coordinates));
+    let duration_us = result
+        .samples
+        .last()
+        .map(|sample| sample.time_us.max(1))
+        .unwrap_or(5_000_000);
+    let points = |x: bool| {
+        result
+            .samples
+            .iter()
+            .map(|sample| {
+                let horizontal = sample.time_us as f32 / duration_us as f32 * 600.0;
+                let value = if x {
+                    sample.gyro_x_radps
+                } else {
+                    sample.gyro_y_radps
+                };
+                format!("{:.1},{:.1}", horizontal, 130.0 - value / peak * 105.0)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let fitted = fit
+        .as_ref()
+        .map(|model| model.simulated(model.coordinates))
+        .unwrap_or_default();
+    let fitted_points = result
+        .samples
+        .iter()
+        .zip(fitted.iter())
+        .map(|(sample, value)| {
+            let horizontal = sample.time_us as f32 / duration_us as f32 * 600.0;
+            format!(
+                "{:.1},{:.1}",
+                horizontal,
+                130.0 - *value as f32 / peak * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fit_parameters = fit
+        .as_ref()
+        .map(|model| model.parameters(model.coordinates));
     html! {
         <div class="inertia-page">
             <Card title="moment of inertia measurement" icon="rotate_right">
@@ -708,8 +921,14 @@ fn MomentOfInertia() -> Html {
 #[function_component]
 fn RocketOnboarding() -> Html {
     let page = use_state(|| 0_usize);
-    let show_calibration = { let page = page.clone(); Callback::from(move |_| page.set(0)) };
-    let show_inertia = { let page = page.clone(); Callback::from(move |_| page.set(1)) };
+    let show_calibration = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(0))
+    };
+    let show_inertia = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(1))
+    };
     html! {
         <>
             <Card title="rocket onboarding" icon="school">
@@ -766,13 +985,85 @@ fn FlightDashboard() -> Html {
 }
 
 #[function_component]
+fn WifiSettings() -> Html {
+    let state = use_state_eq(State::default);
+    let ssid = use_state(String::new);
+    let password = use_state(String::new);
+    let saved = use_state(|| false);
+    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    {
+        let state = state.clone();
+        let ssid = ssid.clone();
+        use_effect_with_deps(
+            move |message| {
+                if let Some(message) = &**message {
+                    if let Ok(SocketMessage::State(next)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        if ssid.is_empty() && !next.configured_wifi_ssid.is_empty() {
+                            ssid.set(next.configured_wifi_ssid.clone());
+                        }
+                        state.set(next);
+                    }
+                }
+                || ()
+            },
+            socket.message.clone(),
+        );
+    }
+    let update_ssid = {
+        let ssid = ssid.clone();
+        let saved = saved.clone();
+        Callback::from(move |event: InputEvent| {
+            ssid.set(event.target_unchecked_into::<HtmlInputElement>().value());
+            saved.set(false);
+        })
+    };
+    let update_password = {
+        let password = password.clone();
+        let saved = saved.clone();
+        Callback::from(move |event: InputEvent| {
+            password.set(event.target_unchecked_into::<HtmlInputElement>().value());
+            saved.set(false);
+        })
+    };
+    let save = {
+        let ssid = ssid.clone();
+        let password = password.clone();
+        let socket = socket.clone();
+        let saved = saved.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SetWifi {
+                    ssid: (*ssid).clone(),
+                    password: (*password).clone(),
+                },
+            );
+            password.set(String::new());
+            saved.set(true);
+        })
+    };
+    let active = &state.wifi_state;
+    html! {
+        <Card title="Wi-Fi" icon="wifi">
+            <p>{format!("Active connection: {} ({})", active.credentials.ssid, if active.connection_type == WifiConnectionType::ConnectToExternal { "network" } else { "access point" })}</p>
+            <p>{"Saved network is used on the next reboot. If it cannot be reached, the flight computer starts the LRC-wifi access point."}</p>
+            <div class="config-grid"><label>{"Network name (SSID)"}<input value={(*ssid).clone()} oninput={update_ssid}/></label><label>{"Password"}<input type="password" value={(*password).clone()} oninput={update_password}/></label></div>
+            <button class="save-button" onclick={save} disabled={ssid.is_empty()}>{"Save Wi-Fi settings to flash"}</button>
+            if *saved { <p>{"Saved. Reboot the flight computer to connect using the new network."}</p> }
+        </Card>
+    }
+}
+
+#[function_component]
 fn App() -> Html {
     let tab = use_state(|| 0_usize);
     let activated = {
         let tab = tab.clone();
         Callback::from(move |id| tab.set(id))
     };
-    html! { <div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="school"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><FlightDashboard/></TabPage><TabPage id=1 current_id={*tab}><RocketOnboarding/></TabPage><TabPage id=2 current_id={*tab}><p>{"System settings"}</p></TabPage></div></div> }
+    html! { <div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="school"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><FlightDashboard/></TabPage><TabPage id=1 current_id={*tab}><RocketOnboarding/></TabPage><TabPage id=2 current_id={*tab}><WifiSettings/></TabPage></div></div> }
 }
 fn main() {
     yew::Renderer::<App>::new().render();

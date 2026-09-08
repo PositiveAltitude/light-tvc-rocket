@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const WIFI_CONFIGURATION_NVS_KEY: &str = "wifi";
 const BMP_280_FILTER_GAIN: f32 = 0.05f32;
 const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
 const SERVO_TEST_CAPTURE_MS: u64 = 250;
@@ -59,6 +60,16 @@ fn encoder_to_normalized_position(configuration: &ServoConfiguration, encoder: u
         - half_turn;
     delta as f32
         / ((ENCODER_COUNTS_PER_TURN as f32 / 360.0) * configuration.max_turn_degrees.max(0.01))
+}
+
+fn load_wifi_credentials(nvs: &EspDefaultNvs) -> Option<WifiCredentials> {
+    let length = nvs.blob_len(WIFI_CONFIGURATION_NVS_KEY).ok().flatten()?;
+    let mut bytes = vec![0; length];
+    let bytes = nvs
+        .get_blob(WIFI_CONFIGURATION_NVS_KEY, &mut bytes)
+        .ok()
+        .flatten()?;
+    serde_json::from_slice(bytes).ok()
 }
 
 #[derive(Clone)]
@@ -137,6 +148,13 @@ fn main() -> ! {
             }
         }
     }
+    let wifi_credentials = { load_wifi_credentials(&servo_nvs.lock().unwrap()) };
+    if let Some(credentials) = &wifi_credentials {
+        state.lock().unwrap().configured_wifi_ssid = credentials.ssid.clone();
+        info!("Startup: saved Wi-Fi network loaded");
+    } else {
+        info!("Startup: no saved Wi-Fi network; starting access point");
+    }
     info!("Startup: saved servo configuration loaded");
 
     let mut voltage_regulator = VoltageRegulator::new(peripherals.pins.gpio21);
@@ -206,15 +224,12 @@ fn main() -> ! {
     info!("LED -- OK");
     led_driver.set_rgb(20, 0, 0).unwrap();
 
-    let wifi_configuration = api::WifiConnectionConfiguration {
-        connection_type: api::WifiConnectionType::StartAccessPoint,
-        credentials: api::WifiCredentials {
-            ssid: String::from("light-robot-core"),
-            password: String::from("12345678"),
-        },
-    };
-
-    info!("wifi config {:?}", wifi_configuration);
+    let wifi_configuration = wifi_credentials
+        .map(|credentials| api::WifiConnectionConfiguration {
+            connection_type: api::WifiConnectionType::ConnectToExternal,
+            credentials,
+        })
+        .unwrap_or_default();
 
     #[allow(unused_variables)]
     let wifi = WiFi::new(
@@ -225,6 +240,9 @@ fn main() -> ! {
     )
     .unwrap();
 
+    // Green means the configured network is connected; amber means the
+    // recovery access point is serving the control panel. Red is shown while
+    // connection is still being attempted above.
     match state.lock().unwrap().wifi_state.connection_type {
         WifiConnectionType::ConnectToExternal => led_driver.set_rgb(0, 20, 0).unwrap(),
         _ => led_driver.set_rgb(10, 10, 0).unwrap(),
@@ -243,10 +261,35 @@ fn main() -> ! {
     let inertia_capture_request_ = inertia_capture_request.clone();
     let inertia_capture_state = state.clone();
     let inertia_nvs = servo_nvs.clone();
+    let wifi_nvs = servo_nvs.clone();
+    let wifi_state = state.clone();
     let command_handler = move |c: &api::Command| -> anyhow::Result<()> {
         match c {
             Command::Reset => {}
-            Command::SetWifi { ssid, password } => {}
+            Command::SetWifi { ssid, password } => {
+                anyhow::ensure!(!ssid.is_empty(), "Wi-Fi network name cannot be empty");
+                anyhow::ensure!(
+                    ssid.len() <= 32,
+                    "Wi-Fi network name must be 32 bytes or fewer"
+                );
+                anyhow::ensure!(
+                    password.is_empty() || (8..=63).contains(&password.len()),
+                    "Wi-Fi password must be empty or 8–63 bytes"
+                );
+
+                let credentials = WifiCredentials {
+                    ssid: ssid.clone(),
+                    password: password.clone(),
+                };
+                let bytes = serde_json::to_vec(&credentials)?;
+                wifi_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(WIFI_CONFIGURATION_NVS_KEY, &bytes)?;
+                // Do not expose the password through the state endpoint.
+                wifi_state.lock().unwrap().configured_wifi_ssid = ssid.clone();
+                info!("Wi-Fi network saved to NVS; it will be used after reboot");
+            }
             Command::SetLedColor { r, g, b } => {
                 info!("color");
                 ld.lock()

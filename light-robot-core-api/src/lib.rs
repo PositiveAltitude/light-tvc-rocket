@@ -5,6 +5,9 @@ pub struct State {
     pub battery: BatteryState,
     pub pyro: PyroState,
     pub wifi_state: WifiConnectionConfiguration,
+    /// SSID saved for the next boot. The password is deliberately never sent
+    /// over the HTTP or WebSocket state APIs.
+    pub configured_wifi_ssid: String,
     pub barometer: BarometerState,
     pub imu: ImuState,
     pub inertia_capture: InertiaCaptureState,
