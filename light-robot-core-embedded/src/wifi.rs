@@ -6,6 +6,10 @@ use light_robot_core_api::*;
 use log::info;
 use std::sync::{Arc, Mutex};
 
+/// One initial connection plus two retries before recovery AP mode.
+const CLIENT_CONNECT_ATTEMPTS: usize = 3;
+const CLIENT_RETRY_DELAY_MS: u32 = 1_000;
+
 pub struct WiFi<'a> {
     _wifi: BlockingWifi<EspWifi<'a>>,
     _state: Arc<Mutex<State>>,
@@ -44,32 +48,52 @@ impl<'a> WiFi<'a> {
             }),
         };
 
-        let connection_result = wifi.set_configuration(&client_config).and_then(|_| {
-            wifi.start()?;
-            wifi.connect()?;
-            wifi.wait_netif_up()?;
-            info!("WIFI Connect -- OK");
-            let mut configuration = configuration.clone();
-            configuration.credentials.password = "".into();
-            state.lock().unwrap().wifi_state = configuration;
-            Ok(())
-        });
+        for attempt in 1..=CLIENT_CONNECT_ATTEMPTS {
+            let connection_result: Result<()> = (|| {
+                wifi.set_configuration(&client_config)?;
+                wifi.start()?;
+                wifi.connect()?;
+                wifi.wait_netif_up()?;
+                Ok(())
+            })();
 
-        match connection_result {
-            Ok(_) => {
-                let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-                info!("DHCP info: {:?}", ip_info);
-                Ok(Self {
-                    _wifi: wifi,
-                    _state: state,
-                })
-            }
-            Err(error) => {
-                info!("WIFI Connect -- FAIL: {:?}; starting access point", error);
-                let _ = wifi.stop();
-                Self::start_access_point(wifi, state)
+            match connection_result {
+                Ok(()) => {
+                    info!(
+                        "WIFI Connect -- OK on attempt {}/{}",
+                        attempt,
+                        CLIENT_CONNECT_ATTEMPTS
+                    );
+                    let mut configuration = configuration.clone();
+                    configuration.credentials.password = "".into();
+                    state.lock().unwrap().wifi_state = configuration;
+                    let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
+                    info!("DHCP info: {:?}", ip_info);
+                    return Ok(Self {
+                        _wifi: wifi,
+                        _state: state,
+                    });
+                }
+                Err(error) => {
+                    info!(
+                        "WIFI Connect attempt {}/{} -- FAIL: {:?}",
+                        attempt,
+                        CLIENT_CONNECT_ATTEMPTS,
+                        error
+                    );
+                    // Start every retry from a known driver state; a failed
+                    // authentication attempt can otherwise leave the station
+                    // still connecting when the next connect is requested.
+                    let _ = wifi.stop();
+                    if attempt < CLIENT_CONNECT_ATTEMPTS {
+                        esp_idf_hal::delay::FreeRtos::delay_ms(CLIENT_RETRY_DELAY_MS);
+                    }
+                }
             }
         }
+
+        info!("WIFI Connect -- all attempts failed; starting access point");
+        Self::start_access_point(wifi, state)
     }
 
     fn start_access_point(
