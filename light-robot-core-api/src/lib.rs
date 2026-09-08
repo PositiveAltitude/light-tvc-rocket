@@ -7,6 +7,8 @@ pub struct State {
     pub wifi_state: WifiConnectionConfiguration,
     pub barometer: BarometerState,
     pub imu: ImuState,
+    pub inertia_capture: InertiaCaptureState,
+    pub inertia_configuration: InertiaConfiguration,
     pub servo1: ServoState,
     pub servo2: ServoState,
     pub weight: i32,
@@ -98,6 +100,7 @@ pub struct ServoTestResult {
 pub enum SocketMessage {
     State(State),
     TestResult(ServoTestResult),
+    InertiaCaptureResult(InertiaCaptureResult),
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -174,6 +177,54 @@ pub struct ImuState {
     pub average_rate_hz: f32,
 }
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum InertiaAxis {
+    X,
+    Y,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct InertiaCaptureState {
+    pub running: bool,
+    pub result_revision: u32,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct InertiaGyroSample {
+    /// Timestamp relative to capture start, in microseconds.
+    pub time_us: u32,
+    pub gyro_x_radps: f32,
+    pub gyro_y_radps: f32,
+}
+
+/// A five-second pendulum capture used to determine the rotation axis and
+/// later calculate the vehicle's moment of inertia.
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct InertiaCaptureResult {
+    pub dominant_axis: Option<InertiaAxis>,
+    pub measured_rate_hz: f32,
+    pub samples: Vec<InertiaGyroSample>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct InertiaConfiguration {
+    pub mass_g: f32,
+    /// Distance from the suspension axis to the rocket center of mass.
+    pub center_of_mass_offset_mm: f32,
+    /// Principal moments around the board/rocket X, Y, and Z axes, in kg·m².
+    pub moment_of_inertia_kgm2: [f32; 3],
+}
+
+impl Default for InertiaConfiguration {
+    fn default() -> Self {
+        Self {
+            mass_g: 1000.0,
+            center_of_mass_offset_mm: 100.0,
+            moment_of_inertia_kgm2: [0.0; 3],
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     Reset,
@@ -217,6 +268,13 @@ pub enum Command {
         device: ServoDeviceId,
     },
     SaveServoConfigurations,
+    StartInertiaCapture,
+    SetInertiaConfiguration {
+        configuration: InertiaConfiguration,
+    },
+    SaveInertiaConfiguration {
+        configuration: InertiaConfiguration,
+    },
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]

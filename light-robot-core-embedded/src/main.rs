@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 const BMP_280_FILTER_GAIN: f32 = 0.05f32;
 const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
 const SERVO_TEST_CAPTURE_MS: u64 = 250;
+const INERTIA_CAPTURE_DURATION: Duration = Duration::from_secs(5);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 
@@ -81,6 +82,8 @@ fn main() -> ! {
     let state = Arc::new(Mutex::new(api::State::default()));
 
     let test_data = Arc::new(Mutex::new(api::ServoTestResult::default()));
+    let inertia_capture_result = Arc::new(Mutex::new(api::InertiaCaptureResult::default()));
+    let inertia_capture_request = Arc::new(Mutex::new(false));
     let calibration_action = Arc::new(Mutex::new(CalibrationAction::None));
 
     let peripherals = Peripherals::take().unwrap();
@@ -113,6 +116,24 @@ fn main() -> ! {
         if let Some(bytes) = saved_configuration {
             if let Ok(calibration) = serde_json::from_slice(&bytes) {
                 state.lock().unwrap().servo_calibration = calibration;
+            }
+        }
+    }
+    let saved_inertia_length = { servo_nvs.lock().unwrap().blob_len("inertia").ok().flatten() };
+    if let Some(length) = saved_inertia_length {
+        let mut bytes = vec![0; length];
+        let saved_inertia = {
+            servo_nvs
+                .lock()
+                .unwrap()
+                .get_blob("inertia", &mut bytes)
+                .ok()
+                .flatten()
+                .map(Vec::from)
+        };
+        if let Some(bytes) = saved_inertia {
+            if let Ok(configuration) = serde_json::from_slice(&bytes) {
+                state.lock().unwrap().inertia_configuration = configuration;
             }
         }
     }
@@ -219,6 +240,9 @@ fn main() -> ! {
 
     let calibration_action_ = calibration_action.clone();
     let calibration_state = state.clone();
+    let inertia_capture_request_ = inertia_capture_request.clone();
+    let inertia_capture_state = state.clone();
+    let inertia_nvs = servo_nvs.clone();
     let command_handler = move |c: &api::Command| -> anyhow::Result<()> {
         match c {
             Command::Reset => {}
@@ -281,6 +305,37 @@ fn main() -> ! {
             Command::SaveServoConfigurations => {
                 *calibration_action_.lock().unwrap() = CalibrationAction::Save
             }
+            Command::StartInertiaCapture => {
+                // Ignore duplicate clicks while the previous five-second
+                // capture is running; the sampler consumes this request.
+                let capture_running = inertia_capture_state
+                    .lock()
+                    .unwrap()
+                    .inertia_capture
+                    .running;
+                if !capture_running {
+                    *inertia_capture_request_.lock().unwrap() = true;
+                }
+            }
+            Command::SetInertiaConfiguration { configuration } => {
+                inertia_capture_state.lock().unwrap().inertia_configuration = configuration.clone();
+            }
+            Command::SaveInertiaConfiguration { configuration } => {
+                inertia_capture_state.lock().unwrap().inertia_configuration = configuration.clone();
+                match serde_json::to_vec(configuration) {
+                    Ok(bytes) => match inertia_nvs.lock().unwrap().set_blob("inertia", &bytes) {
+                        Ok(()) => info!("Moment-of-inertia configuration saved to NVS"),
+                        Err(error) => info!(
+                            "Unable to save moment-of-inertia configuration: {:?}",
+                            error
+                        ),
+                    },
+                    Err(error) => info!(
+                        "Unable to serialize moment-of-inertia configuration: {:?}",
+                        error
+                    ),
+                }
+            }
 
             Command::ResetNvs => {}
             Command::TestServo { .. } => {}
@@ -289,7 +344,13 @@ fn main() -> ! {
     };
 
     #[allow(unused_variables)]
-    let server = Server::new(state.clone(), test_data.clone(), command_handler).unwrap();
+    let server = Server::new(
+        state.clone(),
+        test_data.clone(),
+        inertia_capture_result.clone(),
+        command_handler,
+    )
+    .unwrap();
 
     info!("HTTP server -- OK");
     info!("mDNS -- OK");
@@ -315,6 +376,8 @@ fn main() -> ! {
 
     let imu_i2c = i2c.clone();
     let imu_state = state.clone();
+    let imu_inertia_capture_request = inertia_capture_request.clone();
+    let imu_inertia_capture_result = inertia_capture_result.clone();
     let default_imu_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
     esp_idf_hal::task::thread::ThreadSpawnConfiguration {
         name: Some(CStr::from_bytes_with_nul(b"imu-sampler\0").unwrap()),
@@ -330,6 +393,8 @@ fn main() -> ! {
         let mut sample_count = 0_u32;
         let mut first_sample_at = None::<Instant>;
         let mut failure_reported = false;
+        let mut capture_started_at = None::<Instant>;
+        let mut capture = InertiaCaptureResult::default();
         while imu_tick_receiver.recv().is_ok() {
             if !initialized {
                 match imu.initialize() {
@@ -359,7 +424,51 @@ fn main() -> ! {
                     } else {
                         0.0
                     };
+                    let gyro_x_radps = reading.angular_velocity_radps[0];
+                    let gyro_y_radps = reading.angular_velocity_radps[1];
                     imu_state.lock().unwrap().imu = reading;
+
+                    if std::mem::replace(&mut *imu_inertia_capture_request.lock().unwrap(), false) {
+                        capture_started_at = Some(Instant::now());
+                        capture = InertiaCaptureResult::default();
+                        imu_state.lock().unwrap().inertia_capture.running = true;
+                        info!("Moment-of-inertia gyro capture started");
+                    }
+                    if let Some(started_at) = capture_started_at {
+                        capture.samples.push(InertiaGyroSample {
+                            time_us: started_at.elapsed().as_micros() as u32,
+                            gyro_x_radps,
+                            gyro_y_radps,
+                        });
+                        if started_at.elapsed() >= INERTIA_CAPTURE_DURATION {
+                            let (mut x_min, mut x_max) = (f32::INFINITY, f32::NEG_INFINITY);
+                            let (mut y_min, mut y_max) = (f32::INFINITY, f32::NEG_INFINITY);
+                            for sample in &capture.samples {
+                                x_min = x_min.min(sample.gyro_x_radps);
+                                x_max = x_max.max(sample.gyro_x_radps);
+                                y_min = y_min.min(sample.gyro_y_radps);
+                                y_max = y_max.max(sample.gyro_y_radps);
+                            }
+                            capture.dominant_axis = Some(if x_max - x_min >= y_max - y_min {
+                                InertiaAxis::X
+                            } else {
+                                InertiaAxis::Y
+                            });
+                            capture.measured_rate_hz = if capture.samples.len() > 1 {
+                                (capture.samples.len() - 1) as f32
+                                    / started_at.elapsed().as_secs_f32()
+                            } else {
+                                0.0
+                            };
+                            *imu_inertia_capture_result.lock().unwrap() = capture.clone();
+                            let mut state = imu_state.lock().unwrap();
+                            state.inertia_capture.running = false;
+                            state.inertia_capture.result_revision =
+                                state.inertia_capture.result_revision.wrapping_add(1);
+                            capture_started_at = None;
+                            info!("Moment-of-inertia gyro capture finished");
+                        }
+                    }
                 }
                 Err(error) => {
                     if !failure_reported {

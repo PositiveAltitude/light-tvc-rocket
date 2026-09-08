@@ -189,4 +189,16 @@ mwc-button {
 .imu-reading { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; }
 .imu-reading span, .imu-reading + small { font-size: .75rem; color: #555; }
 .imu-reading code { padding: 8px; border-radius: 4px; background: #f2f3f8; color: #20243d; font-size: .86rem; text-transform: none; white-space: pre; }
+.inertia-summary { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: baseline; font-size: .84rem; }
+.inertia-summary span { color: #555; }
+.inertia-plot { width: 100%; height: 260px; margin-top: 16px; border: 1px solid #ddd; background: #fafafa; }
+.inertia-plot .axis { stroke: #777; stroke-width: 1; }
+.inertia-plot .grid { stroke: #ddd; stroke-width: 1; stroke-dasharray: 3 3; }
+.inertia-plot text { font-size: 11px; fill: #555; text-transform: none; }
+.inertia-plot text:nth-of-type(1) { fill: #1565c0; }
+.inertia-plot text:nth-of-type(2) { fill: #d32f2f; }
+.plot-legend { display: flex; gap: 10px; align-items: center; font-size: .78rem; }
+.legend-x { color: #1565c0; }
+.legend-y { color: #d32f2f; }
+.legend-fit { color: #2e7d32; }
 @media (max-width: 420px) { .config-grid { grid-template-columns: 1fr; } }

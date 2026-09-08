@@ -25,6 +25,7 @@ impl Server {
     pub fn new<F>(
         state: Arc<Mutex<State>>,
         test_data: Arc<Mutex<ServoTestResult>>,
+        inertia_capture_result: Arc<Mutex<InertiaCaptureResult>>,
         command_handler: F,
     ) -> Result<Self>
     where
@@ -199,6 +200,7 @@ impl Server {
 
         let ws_state = state.clone();
         let ws_test_data = test_data.clone();
+        let ws_inertia_capture_result = inertia_capture_result.clone();
         let default_publisher_thread_config =
             esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
         esp_idf_hal::task::thread::ThreadSpawnConfiguration {
@@ -211,6 +213,7 @@ impl Server {
         .unwrap();
         thread::spawn(move || {
             let mut sent_test_revision = 0;
+            let mut sent_inertia_result_revision = 0;
             loop {
                 FreeRtos::delay_ms(50);
                 let state = ws_state.lock().unwrap().clone();
@@ -230,6 +233,15 @@ impl Server {
                         let _ = sender.send(FrameType::Text(false), &message);
                     }
                     sent_test_revision = state.servo_calibration.test_result_revision;
+                }
+                if state.inertia_capture.result_revision != sent_inertia_result_revision {
+                    let result = ws_inertia_capture_result.lock().unwrap().clone();
+                    if let Ok(message) =
+                        serde_json::to_vec(&SocketMessage::InertiaCaptureResult(result))
+                    {
+                        let _ = sender.send(FrameType::Text(false), &message);
+                    }
+                    sent_inertia_result_revision = state.inertia_capture.result_revision;
                 }
                 if let Ok(message) = serde_json::to_vec(&SocketMessage::State(state)) {
                     let _ = sender.send(FrameType::Text(false), &message);
