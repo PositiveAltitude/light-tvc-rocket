@@ -86,17 +86,29 @@ fn ServoCalibration() -> Html {
     let testing = use_state(|| false);
     let selected_device = use_state(|| 0_usize);
     let draft = use_state(|| ConfigDraft::from_config(&ServoConfiguration::default()));
+    let configuration_loaded = use_state(|| false);
     let socket = use_websocket("ws://lrc.local/ws".to_owned());
     {
         let state = state.clone();
         let tests = tests.clone();
         let testing = testing.clone();
+        let config = config.clone();
+        let draft = draft.clone();
+        let enabled = enabled.clone();
+        let configuration_loaded = configuration_loaded.clone();
         use_effect_with_deps(
             move |message| {
                 if let Some(message) = &**message {
                     if let Ok(SocketMessage::State(new_state)) =
                         serde_json::from_str::<SocketMessage>(message)
                     {
+                        if !*configuration_loaded {
+                            let configuration = new_state.servo_calibration.x.clone();
+                            draft.set(ConfigDraft::from_config(&configuration));
+                            config.set(configuration);
+                            enabled.set(new_state.servo_calibration.x_enabled);
+                            configuration_loaded.set(true);
+                        }
                         state.set(new_state);
                     }
                     if let Ok(SocketMessage::TestResult(result)) =
@@ -178,6 +190,14 @@ fn ServoCalibration() -> Html {
         Callback::from(move |event: Event| {
             let mut next = (*config).clone();
             next.reverse_motor = event.target_unchecked_into::<HtmlInputElement>().checked();
+            config.set(next);
+        })
+    };
+    let toggle_control_reverse = {
+        let config = config.clone();
+        Callback::from(move |event: Event| {
+            let mut next = (*config).clone();
+            next.reverse_control = event.target_unchecked_into::<HtmlInputElement>().checked();
             config.set(next);
         })
     };
@@ -315,8 +335,19 @@ fn ServoCalibration() -> Html {
         })
     };
     let save = {
+        let axis = axis.clone();
+        let config = config.clone();
         let socket = socket.clone();
-        Callback::from(move |_| send_command(&socket, Command::SaveServoConfigurations))
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SetServoConfiguration {
+                    axis: *axis,
+                    configuration: (*config).clone(),
+                },
+            );
+            send_command(&socket, Command::SaveServoConfigurations);
+        })
     };
     let detected = if *axis == ServoAxis::X {
         state.servo_calibration.detected_x
@@ -352,7 +383,7 @@ fn ServoCalibration() -> Html {
     html! { <div class="calibration-page">
       <Card title="servo calibration" icon="tune"><p class="safety-note">{"Bench use only: restrain the vehicle and keep clear of the TVC mechanism before enabling a motor."}</p><div class="axis-row"><span>{"Servo:"}</span><button class={if *axis == ServoAxis::X {"selected"} else {""}} onclick={select_axis(ServoAxis::X)}>{"X axis"}</button><button class={if *axis == ServoAxis::Y {"selected"} else {""}} onclick={select_axis(ServoAxis::Y)}>{"Y axis"}</button></div>{device_picker}<div class="status">{format!("{}: {}; encoder {}", axis_name(*axis), if detected {"detected"} else {"not detected"}, position)}<br/>{match assigned_device { Some(device) => format!("Assigned: {}", device_name(device)), None => "No device assigned to this axis".into() }}</div></Card>
       <Card title="configuration" icon="settings"><div class="config-grid">
-        <label>{"Encoder zero (0–16383)"}<input type="number" min="0" max="16383" step="1" value={draft.zero.clone()} oninput={update("zero")}/></label><label>{"Max turn (° at ±1.0)"}<input type="number" min="0.01" step="0.1" value={draft.turn.clone()} oninput={update("turn")}/></label><label>{"Position P"}<input type="number" step="0.001" value={draft.p.clone()} oninput={update("p")}/></label><label>{"Position I"}<input type="number" step="0.001" value={draft.i.clone()} oninput={update("i")}/></label><label>{"Position D"}<input type="number" step="0.001" value={draft.d.clone()} oninput={update("d")}/></label><label>{"Duty limit (0–1)"}<input type="number" min="0" max="1" step="0.01" value={draft.limit.clone()} oninput={update("limit")}/></label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_motor} onchange={toggle_reverse}/>{"Reverse motor direction"}</label>
+        <label>{"Encoder zero (0–16383)"}<input type="number" min="0" max="16383" step="1" value={draft.zero.clone()} oninput={update("zero")}/></label><label>{"Max turn (° at ±1.0)"}<input type="number" min="0.01" step="0.1" value={draft.turn.clone()} oninput={update("turn")}/></label><label>{"Position P"}<input type="number" step="0.001" value={draft.p.clone()} oninput={update("p")}/></label><label>{"Position I"}<input type="number" step="0.001" value={draft.i.clone()} oninput={update("i")}/></label><label>{"Position D"}<input type="number" step="0.001" value={draft.d.clone()} oninput={update("d")}/></label><label>{"Duty limit (0–1)"}<input type="number" min="0" max="1" step="0.01" value={draft.limit.clone()} oninput={update("limit")}/></label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_motor} onchange={toggle_reverse}/>{"Reverse motor direction (servo firmware)"}</label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_control} onchange={toggle_control_reverse}/>{"Reverse TVC command direction (flight controller: −1 ↔ +1)"}</label>
       </div><div class="button-row"><button onclick={apply}>{"Apply configuration"}</button><button onclick={capture_zero}>{"Capture current position as zero"}</button></div></Card>
       <Card title="manual test" icon="gamepad"><button class={if *enabled {"danger"} else {""}} onclick={toggle}>{if *enabled {"Motor ON — holding position"} else {"Motor OFF — freewheeling"}}</button><label class="slider-label">{format!("Command: {:.2}", *manual_position)}<input type="range" min="-1" max="1" step="0.01" value={manual_position.to_string()} disabled={!*enabled} oninput={manual} onchange={send_manual}/></label></Card>
       <Card title="automatic step-response test" icon="show_chart"><p>{"Moves to zero, settles for 2 s, then steps to +0.75. The flight computer records at 1000 Hz for 250 ms."}</p><button disabled={*testing} onclick={start_test}>{if *testing {"Capturing…"} else {"Run performance test"}}</button><TestPlot tests={(*tests).clone()}/><TestTable tests={tests.clone()} config={config.clone()}/></Card><button class="save-button" onclick={save}>{"Save current configurations to flash"}</button>
@@ -929,13 +960,63 @@ fn RocketOnboarding() -> Html {
         let page = page.clone();
         Callback::from(move |_| page.set(1))
     };
+    let show_orientation = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(2))
+    };
     html! {
         <>
             <Card title="rocket onboarding" icon="school">
-                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button></div>
+                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button><button class={if *page == 2 {"selected"} else {""}} onclick={show_orientation}>{"TVC orientation"}</button></div>
             </Card>
-            if *page == 0 { <ServoCalibration/> } else { <MomentOfInertia/> }
+            if *page == 0 { <ServoCalibration/> } else if *page == 1 { <MomentOfInertia/> } else { <ServoOrientationCheck/> }
         </>
+    }
+}
+
+#[function_component]
+fn ServoOrientationCheck() -> Html {
+    let state = use_state_eq(State::default);
+    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    {
+        let state = state.clone();
+        use_effect_with_deps(
+            move |message| {
+                if let Some(message) = &**message {
+                    if let Ok(SocketMessage::State(next)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        state.set(next);
+                    }
+                }
+                || ()
+            },
+            socket.message.clone(),
+        );
+    }
+    let toggle = {
+        let socket = socket.clone();
+        let state = state.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SetServoOrientationCheck {
+                    running: !state.servo_calibration.orientation_check_running,
+                },
+            );
+        })
+    };
+    let calibration = &state.servo_calibration;
+    html! {
+        <div class="calibration-page">
+            <Card title="TVC direction check" icon="screen_rotation">
+                <p class="safety-note">{"Bench use only: secure the unpowered rocket horizontally, keep clear of the TVC mechanism, and do not arm pyro outputs."}</p>
+                <p>{"Start the check, then slowly roll the rocket around its cylindrical Z axis. The nozzles should continuously point down toward the ground so the rocket would nose-dive. Stop immediately if either axis moves the wrong way."}</p>
+                <p>{"X/Y servo assignment is assumed correct. Correct a reversed axis with ‘Reverse TVC command direction’ on the Servo calibration page, then save that configuration to flash."}</p>
+                <div class="status">{format!("IMU: {} · commands: X {:+.2}, Y {:+.2}", if state.imu.present { "online" } else { "offline" }, calibration.orientation_check_command[0], calibration.orientation_check_command[1])}</div>
+                <button class={if calibration.orientation_check_running {"danger"} else {""}} disabled={!state.imu.present && !calibration.orientation_check_running} onclick={toggle}>{if calibration.orientation_check_running {"Stop direction check — disable servos"} else {"Start direction check"}}</button>
+            </Card>
+        </div>
     }
 }
 
@@ -990,6 +1071,7 @@ fn WifiSettings() -> Html {
     let ssid = use_state(String::new);
     let password = use_state(String::new);
     let saved = use_state(|| false);
+    let restart_armed = use_state(|| false);
     let socket = use_websocket("ws://lrc.local/ws".to_owned());
     {
         let state = state.clone();
@@ -1044,6 +1126,18 @@ fn WifiSettings() -> Html {
             saved.set(true);
         })
     };
+    let restart_flight_controller = {
+        let socket = socket.clone();
+        let restart_armed = restart_armed.clone();
+        Callback::from(move |_| {
+            if *restart_armed {
+                send_command(&socket, Command::Reset);
+                restart_armed.set(false);
+            } else {
+                restart_armed.set(true);
+            }
+        })
+    };
     let active = &state.wifi_state;
     html! {
         <Card title="Wi-Fi" icon="wifi">
@@ -1052,6 +1146,10 @@ fn WifiSettings() -> Html {
             <div class="config-grid"><label>{"Network name (SSID)"}<input value={(*ssid).clone()} oninput={update_ssid}/></label><label>{"Password"}<input type="password" value={(*password).clone()} oninput={update_password}/></label></div>
             <button class="save-button" onclick={save} disabled={ssid.is_empty()}>{"Save Wi-Fi settings to flash"}</button>
             if *saved { <p>{"Saved. Reboot the flight computer to connect using the new network."}</p> }
+            <Card title="flight controller" icon="restart_alt">
+                <p>{"Restarts the flight controller. Saved Wi-Fi, servo, and inertia settings are retained."}</p>
+                <button class="danger" onclick={restart_flight_controller}>{if *restart_armed {"Confirm flight-controller restart"} else {"Restart flight controller"}}</button>
+            </Card>
         </Card>
     }
 }
