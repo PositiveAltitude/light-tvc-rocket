@@ -1,8 +1,8 @@
 name: CI
 
-on:
-  push:
-  pull_request:
+# CI is intentionally disabled for automatic GitHub Actions runs. It remains
+# available for an explicit manual run from the Actions tab when needed.
+on: workflow_dispatch
 
 permissions:
   contents: read
