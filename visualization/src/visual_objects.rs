@@ -214,7 +214,7 @@ pub fn spawn_all_entities(
         };
     }
 
-    rocket!(Transform::from_xyz(0.0, 0.0, 0.0));
+    // rocket!(Transform::from_xyz(0.0, 0.0, 0.0));
 
     commands.spawn(PbrBundle {
         mesh: meshes.add(Mesh::from(Circle::new(10.0))),

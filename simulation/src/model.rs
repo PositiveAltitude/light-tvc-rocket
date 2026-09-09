@@ -37,6 +37,11 @@ pub struct RocketParameters {
     pub tvc_misalignment: Vec2,
     pub max_tvc_turn_rate: f32,
     pub tvc_delay: u8,
+
+    pub drag_cd_0: f32,
+    pub drag_cd_90: f32,
+    pub drag_a_and_density_half: f32,
+    pub cp_com_offset: Vec3,
 }
 
 #[derive(Clone)]
@@ -62,6 +67,7 @@ pub struct ControlInputs {
     pub parachute: bool,
 }
 
+#[derive(Clone)]
 pub struct SimulationLog {
     pub time: f32,
     pub position: Vec3,

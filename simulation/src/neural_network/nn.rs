@@ -1,4 +1,4 @@
-use crate::control_system::NNControlSystem;
+use crate::control_system::{NNControlSystem, PIDControlSystem};
 use crate::model::{
     ControlSystem, Environment, RocketParameters, RocketState, Simulation, SimulationLog,
 };
@@ -47,9 +47,9 @@ impl Clone for NeuralNetwork {
 
 impl NeuralNetwork {
     pub fn calculate(&self, inputs: Vec<f32>) -> Vec<f32> {
-        
-        
-        
+
+
+
         let mut previous_layer: Vec<f32> = Vec::new();
         let mut current_layer: Vec<f32> = Vec::new();
         for i in inputs {
@@ -72,11 +72,12 @@ impl NeuralNetwork {
             }
             previous_layer = current_layer.clone();
         }
-        
+
         current_layer
     }
 }
 
+#[derive(Clone)]
 pub struct Population {
     pub generation: u64,
     pub agents: Vec<(NeuralNetwork, Vec<Vec<SimulationLog>>, f64)>,
@@ -89,6 +90,7 @@ pub struct Problem {
 impl Problem {
     pub fn calculate_target(&self, nn: &NeuralNetwork) -> (Vec<Vec<SimulationLog>>, f64) {
         let mut control_system = NNControlSystem::new(nn);
+        // let mut control_system = PIDControlSystem::new(2.0, 2.0, 0.8);
 
         let res = self
             .rockets
@@ -112,11 +114,12 @@ impl Problem {
                     .iter()
                     .map(|sl| {
                         let up = Vec3::new(0.0, 0.0, 1.0);
-                        (sl.rotation * up).dot(up) as f64
+                        (sl.rotation * up).z.powi(2) as f64
                     })
                     .sum::<f64>();
+                target = target / 501.0;
 
-                if sl.len() < 501 {target += -5010.0};
+                if sl.len() == 501 {target += 9.0};
                 (sl, target)
             })
             .collect::<Vec<_>>();

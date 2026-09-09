@@ -44,7 +44,7 @@ impl ControlSystem for PIDControlSystem {
             *(Vec2::new(direction.x, direction.y)
                 .try_normalize()
                 .get_or_insert(Vec2::default()))
-                * direction.dot(vertical).acos()
+                * direction.dot(vertical).clamp(-1.0, 1.0).acos()
         };
 
         let xp = -deviation.y * self.p_gain;
@@ -110,21 +110,21 @@ impl<'a> ControlSystem for NNControlSystem<'a> {
             *(Vec2::new(direction.x, direction.y)
                 .try_normalize()
                 .get_or_insert(Vec2::default()))
-                * (direction.dot(vertical).clamp(-1.0, 1.0)).acos()
+                * direction.dot(vertical).clamp(-1.0, 1.0).acos()
         };
 
         let ans_x = self
             .nn
-            .calculate(vec![deviation.x, sd.gyr.x, self.temp_value_x]);
+            .calculate(vec![-deviation.y, sd.gyr.x, self.temp_value_x]);
         let ans_x_2 = self
             .nn
-            .calculate(vec![-deviation.x, -sd.gyr.x, -self.temp_value_x]);
+            .calculate(vec![deviation.y, -sd.gyr.x, -self.temp_value_x]);
         let ans_y = self
             .nn
-            .calculate(vec![deviation.y, sd.gyr.y, self.temp_value_y]);
+            .calculate(vec![deviation.x, sd.gyr.y, self.temp_value_y]);
         let ans_y_2 = self
             .nn
-            .calculate(vec![-deviation.y, -sd.gyr.y, -self.temp_value_y]);
+            .calculate(vec![-deviation.x, -sd.gyr.y, -self.temp_value_y]);
 
         let x = ans_x[0] - ans_x_2[0];
         let y = ans_y[0] - ans_y_2[0];
@@ -133,7 +133,7 @@ impl<'a> ControlSystem for NNControlSystem<'a> {
         self.temp_value_y = ans_y[1] - ans_y_2[1];
 
         ControlInputs {
-            tvc: Vec2::new(x, y),
+            tvc: Vec2::new(x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)),
             ignition: false,
             parachute: false,
         }

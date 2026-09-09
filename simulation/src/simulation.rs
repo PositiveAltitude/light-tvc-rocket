@@ -103,16 +103,32 @@ impl Simulation for NumericalSimulation {
 
         let thrust = tvc_rotation * Vec3::new(0.0, 0.0, thrust_value);
 
-        let total_force = mg + state.rotation * thrust;
-        let a = total_force / rp.mass;
+        let rocket_direction = state.rotation * Vec3::new(0.0, 0.0, 1.0);
 
+        let velocity_length = state.velocity.length();
+
+        let drag_aoa_cos = if velocity_length != 0.0 {
+            state.velocity.dot(rocket_direction) / state.velocity.length()
+        } else {
+            1.0
+        };
+        let drag_cd =
+            rp.drag_cd_90 + (drag_aoa_cos * drag_aoa_cos) * (rp.drag_cd_0 - rp.drag_cd_90);
+        let drag_force =
+            -state.velocity * (state.velocity.length()) * rp.drag_a_and_density_half * drag_cd;
+
+        let total_force = mg + state.rotation * thrust + drag_force;
+        let a = total_force / rp.mass;
+        
         state.time += env.dt;
 
         state.acceleration = a;
         state.velocity += a * env.dt;
         state.position += state.velocity * env.dt;
 
-        let moment = rp.motor_com_offset.cross(thrust);
+        let moment = rp.motor_com_offset.cross(thrust)
+            + rp.cp_com_offset
+                .cross(state.rotation.conjugate() * drag_force);
 
         fn d_omega(w: &Vec3, i: &Vec3, m: &Vec3) -> Vec3 {
             Vec3::new(
