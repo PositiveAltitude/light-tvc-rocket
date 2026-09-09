@@ -11,12 +11,14 @@ codegen-units = 1
 
 [dependencies]
 light-robot-core-api = {path = "../light-robot-core-api"}
+light-robot-core-simulation = {path = "../light-robot-core-simulation"}
+light-robot-core-flight-control = {path = "../light-robot-core-flight-control"}
 
 yew = { version = "0.20", features = ["csr"] }
 #yew-mdc = {git = "https://github.com/lukepfeiffer10/yew-mdc.git"}
 yew-hooks = "0.2.0"
 material-yew = { version = "0.3.0", features = ["full"] }
-web-sys = { version = "0.3.104", features = ["CanvasRenderingContext2d", "DomRect", "Element", "HtmlCanvasElement"] }
+web-sys = { version = "0.3.104", features = ["CanvasRenderingContext2d", "DomRect", "Element", "HtmlCanvasElement", "HtmlInputElement", "KeyboardEvent"] }
 reqwasm = "0.5.0"
 wasm-bindgen = "0.2.127"
 wasm-bindgen-futures = "0.4.77"

@@ -12,6 +12,10 @@ pub struct State {
     pub imu: ImuState,
     pub inertia_capture: InertiaCaptureState,
     pub inertia_configuration: InertiaConfiguration,
+    /// Parameters for the browser-side flight-model preview.  Vehicle mass,
+    /// inertia and the gimbal-to-COM distance deliberately live in
+    /// `inertia_configuration`, since they are measured during onboarding.
+    pub simulation_configuration: SimulationConfiguration,
     pub servo1: ServoState,
     pub servo2: ServoState,
     pub weight: i32,
@@ -229,6 +233,49 @@ pub struct InertiaConfiguration {
     pub moment_of_inertia_kgm2: [f32; 3],
 }
 
+/// Tunable inputs to the onboarding flight simulation.
+///
+/// Units are SI except where a field explicitly says degrees or milliseconds.
+/// This is a data-only type: the simulation crate turns it, together with the
+/// measured `InertiaConfiguration`, into a physical model.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimulationConfiguration {
+    pub thrust_newtons: f32,
+    pub burn_time_s: f32,
+    pub max_tvc_angle_degrees: f32,
+    pub max_tvc_rate_degrees_per_s: f32,
+    pub tvc_delay_ms: u16,
+    pub tvc_misalignment_degrees: [f32; 2],
+    pub drag_coefficient_axial: f32,
+    pub drag_coefficient_sideways: f32,
+    /// Reference area in square metres.
+    pub reference_area_m2: f32,
+    pub center_of_pressure_offset_mm: f32,
+    pub wind_mps: [f32; 3],
+    pub initial_tilt_degrees: [f32; 2],
+    pub pid_gains: [f32; 3],
+}
+
+impl Default for SimulationConfiguration {
+    fn default() -> Self {
+        Self {
+            thrust_newtons: 3.0,
+            burn_time_s: 5.0,
+            max_tvc_angle_degrees: 5.0,
+            max_tvc_rate_degrees_per_s: 286.5,
+            tvc_delay_ms: 20,
+            tvc_misalignment_degrees: [0.0; 2],
+            drag_coefficient_axial: 0.2,
+            drag_coefficient_sideways: 1.2,
+            reference_area_m2: 0.01,
+            center_of_pressure_offset_mm: 50.0,
+            wind_mps: [0.0; 3],
+            initial_tilt_degrees: [3.0, 0.0],
+            pid_gains: [2.0, 2.0, 0.8],
+        }
+    }
+}
+
 impl Default for InertiaConfiguration {
     fn default() -> Self {
         Self {
@@ -290,6 +337,12 @@ pub enum Command {
     },
     SaveInertiaConfiguration {
         configuration: InertiaConfiguration,
+    },
+    SetSimulationConfiguration {
+        configuration: SimulationConfiguration,
+    },
+    SaveSimulationConfiguration {
+        configuration: SimulationConfiguration,
     },
 }
 

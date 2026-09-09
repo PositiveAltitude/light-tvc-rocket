@@ -1,0 +1,7 @@
+[package]
+name = "light-robot-core-flight-control"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+light-robot-core-simulation = { path = "../light-robot-core-simulation" }

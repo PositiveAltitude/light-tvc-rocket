@@ -201,4 +201,13 @@ mwc-button {
 .legend-x { color: #1565c0; }
 .legend-y { color: #d32f2f; }
 .legend-fit { color: #2e7d32; }
+.simulation-readonly { display: flex; flex-direction: column; gap: 5px; margin: 10px 0 16px; color: #555; font-size: .82rem; }
+.inline-inputs, .triple-inputs { display: flex; gap: 5px; }
+.inline-inputs input, .triple-inputs input { min-width: 0; width: 100%; }
+.simulation-plot { width: 100%; height: 260px; margin: 12px 0; border: 1px solid #ddd; background: #fafafa; }
+.simulation-plot .axis { stroke: #777; stroke-width: 1; }
+.simulation-plot .grid { stroke: #ddd; stroke-width: 1; stroke-dasharray: 3 3; }
+.simulation-plot .cutoff { stroke: #ef6c00; stroke-width: 2; stroke-dasharray: 5 4; }
+.simulation-plot .reference { stroke: #9e9e9e; stroke-width: 1; stroke-dasharray: 3 3; }
+.simulation-plot text { font-size: 11px; fill: #555; text-transform: none; }
 @media (max-width: 420px) { .config-grid { grid-template-columns: 1fr; } }

@@ -242,6 +242,16 @@ fn main() -> ! {
             }
         }
     }
+    let saved_simulation_length = { servo_nvs.lock().unwrap().blob_len("simulation").ok().flatten() };
+    if let Some(length) = saved_simulation_length {
+        let mut bytes = vec![0; length];
+        let saved_simulation = servo_nvs.lock().unwrap().get_blob("simulation", &mut bytes).ok().flatten().map(Vec::from);
+        if let Some(bytes) = saved_simulation {
+            if let Ok(configuration) = serde_json::from_slice(&bytes) {
+                state.lock().unwrap().simulation_configuration = configuration;
+            }
+        }
+    }
     let wifi_credentials = { load_wifi_credentials(&servo_nvs.lock().unwrap()) };
     if let Some(credentials) = &wifi_credentials {
         state.lock().unwrap().configured_wifi_ssid = credentials.ssid.clone();
@@ -460,6 +470,19 @@ fn main() -> ! {
                         "Unable to serialize moment-of-inertia configuration: {:?}",
                         error
                     ),
+                }
+            }
+            Command::SetSimulationConfiguration { configuration } => {
+                inertia_capture_state.lock().unwrap().simulation_configuration = configuration.clone();
+            }
+            Command::SaveSimulationConfiguration { configuration } => {
+                inertia_capture_state.lock().unwrap().simulation_configuration = configuration.clone();
+                match serde_json::to_vec(configuration) {
+                    Ok(bytes) => match inertia_nvs.lock().unwrap().set_blob("simulation", &bytes) {
+                        Ok(()) => info!("Simulation configuration saved to NVS"),
+                        Err(error) => info!("Unable to save simulation configuration: {:?}", error),
+                    },
+                    Err(error) => info!("Unable to serialize simulation configuration: {:?}", error),
                 }
             }
 

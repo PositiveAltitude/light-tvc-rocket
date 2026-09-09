@@ -3,6 +3,8 @@ mod components;
 use crate::components::*;
 use gloo::timers::callback::{Interval, Timeout};
 use light_robot_core_api::*;
+use light_robot_core_flight_control::PidControlSystem;
+use light_robot_core_simulation::{Environment, NumericalSimulation, Quat, RocketParameters, RocketState, SimulationLog, Vec3};
 use material_yew::{MatTab, MatTabBar};
 use reqwasm::http::Request;
 use serde::de::DeserializeOwned;
@@ -155,8 +157,8 @@ fn ServoCalibration() -> Html {
     let update = |field: &'static str| {
         let config = config.clone();
         let draft = draft.clone();
-        Callback::from(move |event: InputEvent| {
-            let text = event.target_unchecked_into::<HtmlInputElement>().value();
+        Callback::from(move |value: f32| {
+            let text = value.to_string();
             let mut next_draft = (*draft).clone();
             match field {
                 "zero" => next_draft.zero = text.clone(),
@@ -168,10 +170,6 @@ fn ServoCalibration() -> Html {
                 _ => {}
             }
             draft.set(next_draft);
-            let value = text.parse::<f32>();
-            let Ok(value) = value else {
-                return;
-            };
             let mut c = (*config).clone();
             match field {
                 "turn" => c.max_turn_degrees = value,
@@ -383,7 +381,7 @@ fn ServoCalibration() -> Html {
     html! { <div class="calibration-page">
       <Card title="servo calibration" icon="tune"><p class="safety-note">{"Bench use only: restrain the vehicle and keep clear of the TVC mechanism before enabling a motor."}</p><div class="axis-row"><span>{"Servo:"}</span><button class={if *axis == ServoAxis::X {"selected"} else {""}} onclick={select_axis(ServoAxis::X)}>{"X axis"}</button><button class={if *axis == ServoAxis::Y {"selected"} else {""}} onclick={select_axis(ServoAxis::Y)}>{"Y axis"}</button></div>{device_picker}<div class="status">{format!("{}: {}; encoder {}", axis_name(*axis), if detected {"detected"} else {"not detected"}, position)}<br/>{match assigned_device { Some(device) => format!("Assigned: {}", device_name(device)), None => "No device assigned to this axis".into() }}</div></Card>
       <Card title="configuration" icon="settings"><div class="config-grid">
-        <label>{"Encoder zero (0–16383)"}<input type="number" min="0" max="16383" step="1" value={draft.zero.clone()} oninput={update("zero")}/></label><label>{"Max turn (° at ±1.0)"}<input type="number" min="0.01" step="0.1" value={draft.turn.clone()} oninput={update("turn")}/></label><label>{"Position P"}<input type="number" step="0.001" value={draft.p.clone()} oninput={update("p")}/></label><label>{"Position I"}<input type="number" step="0.001" value={draft.i.clone()} oninput={update("i")}/></label><label>{"Position D"}<input type="number" step="0.001" value={draft.d.clone()} oninput={update("d")}/></label><label>{"Duty limit (0–1)"}<input type="number" min="0" max="1" step="0.01" value={draft.limit.clone()} oninput={update("limit")}/></label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_motor} onchange={toggle_reverse}/>{"Reverse motor direction (servo firmware)"}</label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_control} onchange={toggle_control_reverse}/>{"Reverse TVC command direction (flight controller: −1 ↔ +1)"}</label>
+        <label>{"Encoder zero (0–16383)"}<NumericInput value={draft.zero.clone()} on_commit={update("zero")}/></label><label>{"Max turn (° at ±1.0)"}<NumericInput value={draft.turn.clone()} on_commit={update("turn")}/></label><label>{"Position P"}<NumericInput value={draft.p.clone()} on_commit={update("p")}/></label><label>{"Position I"}<NumericInput value={draft.i.clone()} on_commit={update("i")}/></label><label>{"Position D"}<NumericInput value={draft.d.clone()} on_commit={update("d")}/></label><label>{"Duty limit (0–1)"}<NumericInput value={draft.limit.clone()} on_commit={update("limit")}/></label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_motor} onchange={toggle_reverse}/>{"Reverse motor direction (servo firmware)"}</label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_control} onchange={toggle_control_reverse}/>{"Reverse TVC command direction (flight controller: −1 ↔ +1)"}</label>
       </div><div class="button-row"><button onclick={apply}>{"Apply configuration"}</button><button onclick={capture_zero}>{"Capture current position as zero"}</button></div></Card>
       <Card title="manual test" icon="gamepad"><button class={if *enabled {"danger"} else {""}} onclick={toggle}>{if *enabled {"Motor ON — holding position"} else {"Motor OFF — freewheeling"}}</button><label class="slider-label">{format!("Command: {:.2}", *manual_position)}<input type="range" min="-1" max="1" step="0.01" value={manual_position.to_string()} disabled={!*enabled} oninput={manual} onchange={send_manual}/></label></Card>
       <Card title="automatic step-response test" icon="show_chart"><p>{"Moves to zero, settles for 2 s, then steps to +0.75. The flight computer records at 1000 Hz for 250 ms."}</p><button disabled={*testing} onclick={start_test}>{if *testing {"Capturing…"} else {"Run performance test"}}</button><TestPlot tests={(*tests).clone()}/><TestTable tests={tests.clone()} config={config.clone()}/></Card><button class="save-button" onclick={save}>{"Save current configurations to flash"}</button>
@@ -823,41 +821,26 @@ fn MomentOfInertia() -> Html {
     }
     let update_mass = {
         let configuration = configuration.clone();
-        Callback::from(move |event: InputEvent| {
+        Callback::from(move |value: f32| {
             let mut next = (*configuration).clone();
-            next.mass_g = event
-                .target_unchecked_into::<HtmlInputElement>()
-                .value()
-                .parse()
-                .unwrap_or(next.mass_g)
-                .max(0.0);
+            next.mass_g = value.max(0.0);
             next.moment_of_inertia_kgm2[2] = cylinder_z_inertia(&next);
             configuration.set(next);
         })
     };
     let update_offset = {
         let configuration = configuration.clone();
-        Callback::from(move |event: InputEvent| {
+        Callback::from(move |value: f32| {
             let mut next = (*configuration).clone();
-            next.center_of_mass_offset_mm = event
-                .target_unchecked_into::<HtmlInputElement>()
-                .value()
-                .parse()
-                .unwrap_or(next.center_of_mass_offset_mm)
-                .max(0.0);
+            next.center_of_mass_offset_mm = value.max(0.0);
             configuration.set(next);
         })
     };
     let update_inertia = |index: usize| {
         let configuration = configuration.clone();
-        Callback::from(move |event: InputEvent| {
+        Callback::from(move |value: f32| {
             let mut next = (*configuration).clone();
-            next.moment_of_inertia_kgm2[index] = event
-                .target_unchecked_into::<HtmlInputElement>()
-                .value()
-                .parse()
-                .unwrap_or(next.moment_of_inertia_kgm2[index])
-                .max(0.0);
+            next.moment_of_inertia_kgm2[index] = value.max(0.0);
             configuration.set(next);
         })
     };
@@ -924,7 +907,7 @@ fn MomentOfInertia() -> Html {
             <Card title="moment of inertia measurement" icon="rotate_right">
                 <p class="safety-note">{"Bench use only: secure the rocket in the pendulum fixture, keep clear of its swing path, and do not arm pyro or TVC outputs."}</p>
                 <p>{"Start a five-second gyro capture after releasing the pendulum."}</p>
-                <div class="config-grid"><label>{"Rocket mass (g)"}<input type="number" min="1" step="1" value={configuration.mass_g.to_string()} oninput={update_mass}/></label><label>{"Center of mass position (mm)"}<input type="number" min="1" step="1" value={configuration.center_of_mass_offset_mm.to_string()} oninput={update_offset}/></label><label>{"X moment (kg·m²)"}<input type="number" step="any" value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[0])} oninput={update_inertia(0)}/></label><label>{"Y moment (kg·m²)"}<input type="number" step="any" value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[1])} oninput={update_inertia(1)}/></label><label>{"Z moment — 50 mm cylinder estimate (kg·m²)"}<input type="text" readonly=true value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[2])}/></label></div>
+                <div class="config-grid"><label>{"Rocket mass (g)"}<NumericInput value={configuration.mass_g.to_string()} on_commit={update_mass}/></label><label>{"Center of mass position (mm)"}<NumericInput value={configuration.center_of_mass_offset_mm.to_string()} on_commit={update_offset}/></label><label>{"X moment (kg·m²)"}<NumericInput value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[0])} on_commit={update_inertia(0)}/></label><label>{"Y moment (kg·m²)"}<NumericInput value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[1])} on_commit={update_inertia(1)}/></label><label>{"Z moment — 50 mm cylinder estimate (kg·m²)"}<input type="text" readonly=true value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[2])}/></label></div>
                 <button onclick={start_capture} disabled={state.inertia_capture.running}>{if state.inertia_capture.running {"Capturing gyro data…"} else {"Capture 5 seconds"}}</button>
                 <button class="save-button" onclick={save_configuration}>{"Save parameters to flash"}</button>
             </Card>
@@ -964,14 +947,128 @@ fn RocketOnboarding() -> Html {
         let page = page.clone();
         Callback::from(move |_| page.set(2))
     };
+    let show_simulation = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(3))
+    };
     html! {
         <>
             <Card title="rocket onboarding" icon="school">
-                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button><button class={if *page == 2 {"selected"} else {""}} onclick={show_orientation}>{"TVC orientation"}</button></div>
+                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button><button class={if *page == 2 {"selected"} else {""}} onclick={show_orientation}>{"TVC orientation"}</button><button class={if *page == 3 {"selected"} else {""}} onclick={show_simulation}>{"Flight simulation"}</button></div>
             </Card>
-            if *page == 0 { <ServoCalibration/> } else if *page == 1 { <MomentOfInertia/> } else { <ServoOrientationCheck/> }
+            if *page == 0 { <ServoCalibration/> } else if *page == 1 { <MomentOfInertia/> } else if *page == 2 { <ServoOrientationCheck/> } else { <RocketSimulation/> }
         </>
     }
+}
+
+fn run_rocket_preview(inertia: &InertiaConfiguration, configuration: &SimulationConfiguration) -> Vec<SimulationLog> {
+    let environment = Environment { wind: Vec3::new(configuration.wind_mps[0], configuration.wind_mps[1], configuration.wind_mps[2]), max_time: 8.0, dt: 0.002, substeps: 5, ..Environment::default() };
+    let rocket = RocketParameters::from_configuration(inertia, configuration, environment.dt);
+    let radians = std::f32::consts::PI / 180.0;
+    let mut initial = RocketState::default();
+    initial.rotation = Quat::axis_angle(Vec3::new(1.0, 0.0, 0.0), configuration.initial_tilt_degrees[0] * radians) * Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), configuration.initial_tilt_degrees[1] * radians);
+    let mut controller = PidControlSystem::new(configuration.pid_gains[0], configuration.pid_gains[1], configuration.pid_gains[2]);
+    NumericalSimulation.run(environment, rocket, initial, &mut controller, true)
+}
+
+fn plot_series(trajectory: &[SimulationLog], magnitude: f32, value: impl Fn(&SimulationLog) -> f32) -> String {
+    let duration = trajectory.last().map(|point| point.time).unwrap_or(1.0).max(0.001);
+    trajectory.iter().map(|point| format!("{:.1},{:.1}", 40.0 + point.time / duration * 540.0, 130.0 - value(point) / magnitude * 105.0)).collect::<Vec<_>>().join(" ")
+}
+
+#[function_component]
+fn RocketSimulation() -> Html {
+    let state = use_state_eq(State::default);
+    let configuration = use_state_eq(SimulationConfiguration::default);
+    let trajectory = use_state(Vec::<SimulationLog>::new);
+    let loaded = use_state(|| false);
+    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    {
+        let state = state.clone();
+        let configuration = configuration.clone();
+        let loaded = loaded.clone();
+        use_effect_with_deps(move |message| {
+            if let Some(message) = &**message {
+                if let Ok(SocketMessage::State(next)) = serde_json::from_str::<SocketMessage>(message) {
+                    if !*loaded { configuration.set(next.simulation_configuration.clone()); loaded.set(true); }
+                    state.set(next);
+                }
+            }
+            || ()
+        }, socket.message.clone());
+    }
+    let update = |field: &'static str| {
+        let configuration = configuration.clone();
+        Callback::from(move |value: f32| {
+            let mut next = (*configuration).clone();
+            match field {
+                "thrust" => next.thrust_newtons = value.max(0.0), "burn" => next.burn_time_s = value.max(0.0),
+                "angle" => next.max_tvc_angle_degrees = value.max(0.0), "rate" => next.max_tvc_rate_degrees_per_s = value.max(0.0),
+                "delay" => next.tvc_delay_ms = value.max(0.0).min(u16::MAX as f32).round() as u16,
+                "misalign_x" => next.tvc_misalignment_degrees[0] = value, "misalign_y" => next.tvc_misalignment_degrees[1] = value,
+                "axial" => next.drag_coefficient_axial = value.max(0.0), "sideways" => next.drag_coefficient_sideways = value.max(0.0),
+                "area" => next.reference_area_m2 = value.max(0.0), "cp" => next.center_of_pressure_offset_mm = value,
+                "wind_x" => next.wind_mps[0] = value, "wind_z" => next.wind_mps[2] = value,
+                "tilt_x" => next.initial_tilt_degrees[0] = value, "tilt_y" => next.initial_tilt_degrees[1] = value,
+                "p" => next.pid_gains[0] = value, "i" => next.pid_gains[1] = value, "d" => next.pid_gains[2] = value,
+                _ => {}
+            }
+            configuration.set(next);
+        })
+    };
+    let save = { let configuration = configuration.clone(); let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::SaveSimulationConfiguration { configuration: (*configuration).clone() })) };
+    let start = { let trajectory = trajectory.clone(); let configuration = configuration.clone(); let inertia = state.inertia_configuration.clone(); Callback::from(move |_| trajectory.set(run_rocket_preview(&inertia, &configuration))) };
+    let trajectory = &*trajectory;
+    let trajectory_scale = trajectory.iter().fold(1.0_f32, |scale, point| scale.max(point.position.x.abs()).max(point.position.z.abs()));
+    let trajectory_path = trajectory.iter().map(|point| format!("{:.1},{:.1}", 300.0 + point.position.x / trajectory_scale * 210.0, 235.0 - point.position.z / trajectory_scale * 210.0)).collect::<Vec<_>>().join(" ");
+    let cutoff = trajectory.iter().find(|point| point.time >= configuration.burn_time_s).copied();
+    let cutoff_trajectory = cutoff.map(|point| format!("{:.1},{:.1}", 300.0 + point.position.x / trajectory_scale * 210.0, 235.0 - point.position.z / trajectory_scale * 210.0));
+    let duration = trajectory.last().map(|point| point.time).unwrap_or(1.0).max(0.001);
+    let cutoff_time_x = cutoff.map(|point| 40.0 + point.time / duration * 540.0);
+    let tilt = |point: &SimulationLog| { let up = point.rotation.rotate(Vec3::UP); [(-up.y).atan2(up.z).to_degrees(), up.x.atan2(up.z).to_degrees()] };
+    let tilt_scale = trajectory.iter().fold(10.0_f32, |scale, point| { let value = tilt(point); scale.max(value[0].abs()).max(value[1].abs()) });
+    let tvc_scale = trajectory.iter().fold(configuration.max_tvc_angle_degrees.max(1.0), |scale, point| scale.max((point.tvc[0] * configuration.max_tvc_angle_degrees).abs()).max((point.tvc[1] * configuration.max_tvc_angle_degrees).abs()));
+    let tilt_reference_positive = 130.0 - 5.0 / tilt_scale * 105.0;
+    let tilt_reference_negative = 130.0 + 5.0 / tilt_scale * 105.0;
+    let tvc_reference_positive = 130.0 - configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
+    let tvc_reference_negative = 130.0 + configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
+    let tilt_x_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[0]);
+    let tilt_y_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[1]);
+    let tvc_x_path = plot_series(trajectory, tvc_scale, |point| point.tvc[0] * configuration.max_tvc_angle_degrees);
+    let tvc_y_path = plot_series(trajectory, tvc_scale, |point| point.tvc[1] * configuration.max_tvc_angle_degrees);
+    let final_point = trajectory.last().copied();
+    html! { <div class="simulation-page">
+        <Card title="flight simulation" icon="rocket_launch">
+            <p>{"This is an offline model preview; it never commands hardware. Mass, inertia, and gimbal-to-COM distance come from the Moment of inertia page."}</p>
+            <div class="simulation-readonly"><span>{format!("Mass: {:.0} g", state.inertia_configuration.mass_g)}</span><span>{format!("COM / gimbal: {:.1} mm", state.inertia_configuration.center_of_mass_offset_mm)}</span><span>{format!("Iₓ/Iy: {:.3e} / {:.3e} kg·m²", state.inertia_configuration.moment_of_inertia_kgm2[0], state.inertia_configuration.moment_of_inertia_kgm2[1])}</span></div>
+            <div class="config-grid">
+                <label>{"Thrust (N)"}<NumericInput value={configuration.thrust_newtons.to_string()} on_commit={update("thrust")}/></label>
+                <label>{"Burn time (s)"}<NumericInput value={configuration.burn_time_s.to_string()} on_commit={update("burn")}/></label>
+                <label>{"Max TVC angle (°)"}<NumericInput value={configuration.max_tvc_angle_degrees.to_string()} on_commit={update("angle")}/></label>
+                <label>{"Max TVC rate (°/s)"}<NumericInput value={configuration.max_tvc_rate_degrees_per_s.to_string()} on_commit={update("rate")}/></label>
+                <label>{"TVC delay (ms)"}<NumericInput value={configuration.tvc_delay_ms.to_string()} on_commit={update("delay")}/></label>
+                <label>{"TVC misalignment X / Y (°)"}<span class="inline-inputs"><NumericInput value={configuration.tvc_misalignment_degrees[0].to_string()} on_commit={update("misalign_x")}/><NumericInput value={configuration.tvc_misalignment_degrees[1].to_string()} on_commit={update("misalign_y")}/></span></label>
+                <label>{"Axial / side drag Cd"}<span class="inline-inputs"><NumericInput value={configuration.drag_coefficient_axial.to_string()} on_commit={update("axial")}/><NumericInput value={configuration.drag_coefficient_sideways.to_string()} on_commit={update("sideways")}/></span></label>
+                <label>{"Reference area (m²)"}<NumericInput value={configuration.reference_area_m2.to_string()} on_commit={update("area")}/></label>
+                <label>{"Center of pressure offset (mm)"}<NumericInput value={configuration.center_of_pressure_offset_mm.to_string()} on_commit={update("cp")}/></label>
+                <label>{"Wind X / Z (m/s)"}<span class="inline-inputs"><NumericInput value={configuration.wind_mps[0].to_string()} on_commit={update("wind_x")}/><NumericInput value={configuration.wind_mps[2].to_string()} on_commit={update("wind_z")}/></span></label>
+                <label>{"Initial tilt X / Y (°)"}<span class="inline-inputs"><NumericInput value={configuration.initial_tilt_degrees[0].to_string()} on_commit={update("tilt_x")}/><NumericInput value={configuration.initial_tilt_degrees[1].to_string()} on_commit={update("tilt_y")}/></span></label>
+                <label>{"PID P / I / D"}<span class="triple-inputs"><NumericInput value={configuration.pid_gains[0].to_string()} on_commit={update("p")}/><NumericInput value={configuration.pid_gains[1].to_string()} on_commit={update("i")}/><NumericInput value={configuration.pid_gains[2].to_string()} on_commit={update("d")}/></span></label>
+            </div>
+            <div class="button-row"><button onclick={start}>{"Run simulation"}</button><button class="save-button" onclick={save}>{"Save simulation parameters to flash"}</button></div>
+        </Card>
+        if !trajectory.is_empty() { <><Card title="predicted trajectory" icon="timeline">
+            <p class="plot-legend">{"X (lateral) and Z (height) use the same metres-per-pixel scale. Orange marks motor cut-off."}</p>
+            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="Predicted rocket trajectory"><line x1="30" y1="235" x2="580" y2="235" class="axis"/><line x1="300" y1="15" x2="300" y2="235" class="grid"/><polyline points={trajectory_path} fill="none" stroke="#1565c0" stroke-width="3"/>{if let Some(point) = cutoff_trajectory { html! { <circle cx={point.split(',').next().unwrap_or("0").to_owned()} cy={point.split(',').nth(1).unwrap_or("0").to_owned()} r="5" fill="#ef6c00"/> } } else { Html::default() }}<text x="38" y="225">{"launch"}</text><text x="485" y="252">{format!("±{:.1} m", trajectory_scale)}</text></svg>
+            if let Some(point) = final_point { <div class="inertia-summary"><span>{"Simulated duration"}</span><strong>{format!("{:.2} s", point.time)}</strong><span>{"Final height"}</span><strong>{format!("{:.2} m", point.position.z)}</strong><span>{"Final lateral displacement"}</span><strong>{format!("{:.2} m", point.position.x)}</strong></div> }
+        </Card><Card title="tilt over time" icon="show_chart">
+            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="Rocket tilt over time"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={tilt_reference_positive.to_string()} x2="580" y2={tilt_reference_positive.to_string()} class="reference"/><line x1="40" y1={tilt_reference_negative.to_string()} x2="580" y2={tilt_reference_negative.to_string()} class="reference"/>{if let Some(x) = cutoff_time_x { html! { <line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/> } } else { Html::default() }}<polyline points={tilt_x_path} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={tilt_y_path} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="45" y="25">{"X tilt"}</text><text x="45" y="43">{"Y tilt"}</text><text x="490" y="252">{format!("±{:.1}°", tilt_scale)}</text></svg>
+            <p class="plot-legend"><span class="legend-x">{"X tilt"}</span><span class="legend-y">{"Y tilt"}</span>{" · gray: typical ±5° · orange: motor cut-off"}</p>
+        </Card><Card title="TVC angle over time" icon="settings_input_component">
+            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="TVC angles over time"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={tvc_reference_positive.to_string()} x2="580" y2={tvc_reference_positive.to_string()} class="reference"/><line x1="40" y1={tvc_reference_negative.to_string()} x2="580" y2={tvc_reference_negative.to_string()} class="reference"/>{if let Some(x) = cutoff_time_x { html! { <line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/> } } else { Html::default() }}<polyline points={tvc_x_path} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={tvc_y_path} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="45" y="25">{"X TVC"}</text><text x="45" y="43">{"Y TVC"}</text><text x="490" y="252">{format!("±{:.1}°", tvc_scale)}</text></svg>
+            <p class="plot-legend"><span class="legend-x">{"X TVC"}</span><span class="legend-y">{"Y TVC"}</span>{" · gray: configured TVC limit · orange: motor cut-off"}</p>
+        </Card></> } else { <Card title="simulation preview" icon="play_circle"><p>{"Set the parameters, then press Run simulation to generate the plots."}</p></Card> }
+    </div> }
 }
 
 #[function_component]
