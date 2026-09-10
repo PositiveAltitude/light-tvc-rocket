@@ -5,6 +5,7 @@
 //! must therefore use an append-only layout and must never overwrite a page.
 
 use embedded_hal::spi::{Operation, SpiDevice};
+use esp_idf_hal::delay::FreeRtos;
 
 pub const PAGE_SIZE: usize = 2_048;
 pub const SPARE_SIZE: usize = 64;
@@ -56,9 +57,11 @@ where
 
     /// Returns the three JEDEC bytes.  A W25N01GV normally reports EF AA 21.
     pub fn read_id(&mut self) -> Result<[u8; 3], Error<SPI::Error>> {
-        let mut id = [0; 3];
-        self.transaction(&[CMD_READ_ID], &mut id)?;
-        Ok(id)
+        // The first returned byte is a dummy; then come manufacturer, memory
+        // type, and capacity (EF AA 21 for W25N01GV).
+        let mut response = [0; 4];
+        self.transaction(&[CMD_READ_ID], &mut response)?;
+        Ok([response[1], response[2], response[3]])
     }
 
     /// Reads exactly one 2 KiB data page.  The 64-byte OOB/spare area is not
@@ -94,7 +97,7 @@ where
         // PROGRAM LOAD and its payload must share one chip-select assertion.
         self.write_payload(&[CMD_PROGRAM_LOAD, (column >> 8) as u8, column as u8], data)?;
         self.write_enable()?;
-        self.write(&[CMD_PROGRAM_EXECUTE, (page >> 8) as u8, page as u8])?;
+        self.write(&[CMD_PROGRAM_EXECUTE, 0, (page >> 8) as u8, page as u8])?;
         let status = self.wait_ready()?;
         if status & 0x08 != 0 {
             Err(Error::ProgramFailed)
@@ -110,7 +113,7 @@ where
         }
         let page = block * PAGES_PER_BLOCK;
         self.write_enable()?;
-        self.write(&[CMD_BLOCK_ERASE, (page >> 8) as u8, page as u8])?;
+        self.write(&[CMD_BLOCK_ERASE, 0, (page >> 8) as u8, page as u8])?;
         let status = self.wait_ready()?;
         if status & 0x04 != 0 {
             Err(Error::EraseFailed)
@@ -128,7 +131,7 @@ where
         // first page need not have meaningful ECC parity. Do not reject a
         // block-marker read merely because its main page has an ECC status.
         let page = block * PAGES_PER_BLOCK;
-        self.write(&[CMD_PAGE_READ, (page >> 8) as u8, page as u8])?;
+        self.write(&[CMD_PAGE_READ, 0, (page >> 8) as u8, page as u8])?;
         self.wait_ready()?;
         let mut marker = [0; 1];
         self.read_cache(PAGE_SIZE as u16, &mut marker)?;
@@ -148,7 +151,7 @@ where
     }
 
     fn page_to_cache(&mut self, page: u16) -> Result<(), Error<SPI::Error>> {
-        self.write(&[CMD_PAGE_READ, (page >> 8) as u8, page as u8])?;
+        self.write(&[CMD_PAGE_READ, 0, (page >> 8) as u8, page as u8])?;
         let status = self.wait_ready()?;
         // ECCS=10 or 11 means an uncorrectable page.  ECCS=01 is corrected.
         if status & 0x30 >= 0x20 {
@@ -404,6 +407,9 @@ where
     ) -> Result<u16, ArtifactError<SPI::Error>> {
         let mut page = [0xff; PAGE_SIZE];
         for block in 0..BLOCK_COUNT {
+            if block % 8 == 0 {
+                FreeRtos::delay_ms(1);
+            }
             if self
                 .flash
                 .is_bad_block(block)
@@ -452,6 +458,9 @@ where
         let mut records = Vec::new();
         let mut page = [0xff; PAGE_SIZE];
         for block in 0..BLOCK_COUNT {
+            if block % 8 == 0 {
+                FreeRtos::delay_ms(1);
+            }
             if self
                 .flash
                 .is_bad_block(block)
