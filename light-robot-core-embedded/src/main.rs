@@ -393,14 +393,31 @@ fn main() -> ! {
     )
     .unwrap();
     let mut external_flash = external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
-    match external_flash
+    let external_flash_ready = match external_flash
         .reset()
         .and_then(|_| external_flash.read_id())
     {
-        Ok(id) => info!("External NAND ready: JEDEC {:02x?}", id),
-        Err(error) => info!("External NAND unavailable: {:?}", error),
+        Ok(id) => {
+            info!("External NAND ready: JEDEC {:02x?}", id);
+            match external_flash.clear_write_protection() {
+                Ok(protection) => {
+                    info!("External NAND write protection cleared: SR-1={:02x}", protection);
+                    true
+                }
+                Err(error) => {
+                    info!("External NAND remains write-protected: {:?}", error);
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            info!("External NAND unavailable: {:?}", error);
+            false
+        }
+    };
+    if external_flash_ready {
+        run_flash_self_test(&mut external_flash);
     }
-    run_flash_self_test(&mut external_flash);
 
     let i2c = esp_idf_hal::i2c::I2cDriver::new(
         peripherals.i2c0,

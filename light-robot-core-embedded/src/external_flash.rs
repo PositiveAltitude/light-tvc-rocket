@@ -19,12 +19,14 @@ const CMD_WRITE_ENABLE: u8 = 0x06;
 const CMD_RESET: u8 = 0xff;
 const CMD_READ_ID: u8 = 0x9f;
 const CMD_GET_FEATURE: u8 = 0x0f;
+const CMD_SET_FEATURE: u8 = 0x1f;
 const CMD_PAGE_READ: u8 = 0x13;
 const CMD_READ_CACHE: u8 = 0x03;
 const CMD_PROGRAM_LOAD: u8 = 0x02;
 const CMD_PROGRAM_EXECUTE: u8 = 0x10;
 const CMD_BLOCK_ERASE: u8 = 0xd8;
 const REG_STATUS: u8 = 0xc0;
+const REG_PROTECTION: u8 = 0xa0;
 
 #[derive(Debug)]
 pub enum Error<E> {
@@ -63,6 +65,16 @@ where
         let mut response = [0; 4];
         self.transaction(&[CMD_READ_ID], &mut response)?;
         Ok([response[1], response[2], response[3]])
+    }
+
+    /// Clears the volatile block-protection and /WP-mode bits after power-up.
+    /// The W25N01GV powers up with all blocks protected, so this is required
+    /// before any artifact program or erase operation.
+    pub fn clear_write_protection(&mut self) -> Result<u8, Error<SPI::Error>> {
+        self.write_enable()?;
+        self.write(&[CMD_SET_FEATURE, REG_PROTECTION, 0])?;
+        self.wait_ready()?;
+        self.feature(REG_PROTECTION)
     }
 
     /// Reads exactly one 2 KiB data page.  The 64-byte OOB/spare area is not
@@ -278,6 +290,10 @@ where
 
     pub fn read_id(&mut self) -> Result<[u8; 3], Error<SPI::Error>> {
         self.flash.read_id()
+    }
+
+    pub fn clear_write_protection(&mut self) -> Result<u8, Error<SPI::Error>> {
+        self.flash.clear_write_protection()
     }
 
     /// Begins a new version without modifying older versions. Call `finish`
