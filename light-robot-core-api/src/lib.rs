@@ -133,6 +133,7 @@ pub struct ServoState {
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct BatteryState {
+    pub present: bool,
     pub soc: f32,
     pub voltage: f32,
     pub charge_rate: f32,
@@ -240,8 +241,24 @@ pub struct InertiaConfiguration {
 /// Units are SI except where a field explicitly says degrees or milliseconds.
 /// This is a data-only type: the simulation crate turns it, together with the
 /// measured `InertiaConfiguration`, into a physical model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MotorThrustProfile {
+    /// A rectangular pulse using the configured thrust and burn duration.
+    Constant,
+    /// Raketenmodellbau Klima D3 manufacturer RASP data.
+    KlimaD3,
+}
+
+impl Default for MotorThrustProfile {
+    fn default() -> Self { Self::Constant }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationConfiguration {
+    /// Defaults to `Constant` so configurations saved before profiles existed
+    /// remain readable from flash.
+    #[serde(default)]
+    pub motor_thrust_profile: MotorThrustProfile,
     pub thrust_newtons: f32,
     pub burn_time_s: f32,
     pub max_tvc_angle_degrees: f32,
@@ -265,6 +282,7 @@ pub struct SimulationConfiguration {
 impl Default for SimulationConfiguration {
     fn default() -> Self {
         Self {
+            motor_thrust_profile: MotorThrustProfile::Constant,
             thrust_newtons: 3.0,
             burn_time_s: 5.0,
             max_tvc_angle_degrees: 5.0,

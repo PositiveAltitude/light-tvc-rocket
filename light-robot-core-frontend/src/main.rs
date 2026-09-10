@@ -4,17 +4,20 @@ use crate::components::*;
 use gloo::timers::callback::{Interval, Timeout};
 use light_robot_core_api::*;
 use light_robot_core_flight_control::PidControlSystem;
-use light_robot_core_simulation::{Environment, NumericalSimulation, Quat, RocketParameters, RocketState, SimulationLog, Vec3};
+use light_robot_core_simulation::{
+    Environment, NumericalSimulation, Quat, RocketParameters, RocketState, SimulationLog, Vec3,
+};
 use material_yew::{MatTab, MatTabBar};
 use reqwasm::http::Request;
 use serde::de::DeserializeOwned;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::HtmlInputElement;
+use web_sys::{HtmlInputElement, HtmlSelectElement};
 use yew::prelude::*;
 use yew_hooks::prelude::*;
 
 const COMMAND_URI: &str = "http://lrc.local/command";
 const TEST_COLORS: [&str; 5] = ["#1565c0", "#d32f2f", "#2e7d32", "#7b1fa2", "#ef6c00"];
+const TILT_GRAPH_LIMIT_DEGREES: f32 = 10.0;
 
 fn send_command(socket: &UseWebSocketHandle, command: Command) {
     socket.send(serde_json::to_string(&command).unwrap());
@@ -961,49 +964,159 @@ fn RocketOnboarding() -> Html {
     }
 }
 
-fn run_rocket_preview(inertia: &InertiaConfiguration, configuration: &SimulationConfiguration) -> Vec<SimulationLog> {
-    let environment = Environment { wind: Vec3::new(configuration.wind_mps[0], configuration.wind_mps[1], configuration.wind_mps[2]), max_time: 8.0, dt: 0.002, substeps: 5, ..Environment::default() };
+fn run_rocket_preview(
+    inertia: &InertiaConfiguration,
+    configuration: &SimulationConfiguration,
+) -> Vec<SimulationLog> {
+    let environment = Environment {
+        wind: Vec3::new(
+            configuration.wind_mps[0],
+            configuration.wind_mps[1],
+            configuration.wind_mps[2],
+        ),
+        max_time: 8.0,
+        dt: 0.002,
+        substeps: 5,
+        ..Environment::default()
+    };
     let rocket = RocketParameters::from_configuration(inertia, configuration, environment.dt);
     let radians = std::f32::consts::PI / 180.0;
     let mut initial = RocketState::default();
-    initial.rotation = Quat::axis_angle(Vec3::new(1.0, 0.0, 0.0), configuration.initial_tilt_degrees[0] * radians) * Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), configuration.initial_tilt_degrees[1] * radians);
-    let mut controller = PidControlSystem::new(configuration.pid_gains[0], configuration.pid_gains[1], configuration.pid_gains[2]);
+    initial.rotation = Quat::axis_angle(
+        Vec3::new(1.0, 0.0, 0.0),
+        configuration.initial_tilt_degrees[0] * radians,
+    ) * Quat::axis_angle(
+        Vec3::new(0.0, 1.0, 0.0),
+        configuration.initial_tilt_degrees[1] * radians,
+    );
+    let mut controller = PidControlSystem::new(
+        configuration.pid_gains[0],
+        configuration.pid_gains[1],
+        configuration.pid_gains[2],
+    );
     controller.set_estimated_rotation(initial.rotation);
     NumericalSimulation.run(environment, rocket, initial, &mut controller, true)
 }
 
-fn plot_series(trajectory: &[SimulationLog], magnitude: f32, value: impl Fn(&SimulationLog) -> f32) -> String {
-    let duration = trajectory.last().map(|point| point.time).unwrap_or(1.0).max(0.001);
-    trajectory.iter().map(|point| format!("{:.1},{:.1}", 40.0 + point.time / duration * 540.0, 130.0 - value(point) / magnitude * 105.0)).collect::<Vec<_>>().join(" ")
+fn plot_series(
+    trajectory: &[SimulationLog],
+    magnitude: f32,
+    value: impl Fn(&SimulationLog) -> f32,
+) -> String {
+    let duration = trajectory
+        .last()
+        .map(|point| point.time)
+        .unwrap_or(1.0)
+        .max(0.001);
+    trajectory
+        .iter()
+        .map(|point| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + point.time / duration * 540.0,
+                130.0 - value(point) / magnitude * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Renderer-neutral data consumed by the shared simulation/HIL plot view.
 #[derive(Clone, PartialEq)]
-struct PlotSample { time_s: f32, position: [f32; 3], tilt_degrees: [f32; 2], command: [f32; 2], actual: [f32; 2] }
+struct PlotSample {
+    time_s: f32,
+    position: [f32; 3],
+    tilt_degrees: [f32; 2],
+    command: [f32; 2],
+    actual: [f32; 2],
+}
 
 fn simulation_plot_samples(log: &[SimulationLog]) -> Vec<PlotSample> {
-    log.iter().map(|point| { let up = point.rotation.rotate(Vec3::UP); PlotSample { time_s: point.time, position: [point.position.x, point.position.y, point.position.z], tilt_degrees: [(-up.y).atan2(up.z).to_degrees(), up.x.atan2(up.z).to_degrees()], command: point.tvc, actual: point.tvc } }).collect()
+    log.iter()
+        .map(|point| {
+            let up = point.rotation.rotate(Vec3::UP);
+            PlotSample {
+                time_s: point.time,
+                position: [point.position.x, point.position.y, point.position.z],
+                tilt_degrees: [
+                    (-up.y).atan2(up.z).to_degrees(),
+                    up.x.atan2(up.z).to_degrees(),
+                ],
+                command: point.tvc,
+                actual: point.tvc,
+            }
+        })
+        .collect()
 }
 
 fn hil_plot_samples(log: &[HilSimulationSample]) -> Vec<PlotSample> {
-    log.iter().map(|sample| PlotSample { time_s: sample.scheduled_time_us as f32 / 1_000_000.0, position: sample.position_m, tilt_degrees: sample.orientation_xy_degrees, command: sample.tvc_command, actual: sample.tvc_actual }).collect()
+    log.iter()
+        .map(|sample| PlotSample {
+            time_s: sample.scheduled_time_us as f32 / 1_000_000.0,
+            position: sample.position_m,
+            tilt_degrees: sample.orientation_xy_degrees,
+            command: sample.tvc_command,
+            actual: sample.tvc_actual,
+        })
+        .collect()
 }
 
 #[derive(Properties, PartialEq)]
-struct SimulationResultsProps { samples: Vec<PlotSample>, title: String, cutoff_s: Option<f32>, #[prop_or_default] average_hz: Option<f32> }
+struct SimulationResultsProps {
+    samples: Vec<PlotSample>,
+    title: String,
+    cutoff_s: Option<f32>,
+    #[prop_or_default]
+    average_hz: Option<f32>,
+}
 
 #[function_component]
 fn SimulationResultsView(props: &SimulationResultsProps) -> Html {
-    if props.samples.is_empty() { return html! { <Card title={props.title.clone()} icon="timeline"><p>{"No result is available yet."}</p></Card> }; }
+    if props.samples.is_empty() {
+        return html! { <Card title={props.title.clone()} icon="timeline"><p>{"No result is available yet."}</p></Card> };
+    }
     let duration = props.samples.last().unwrap().time_s.max(0.001);
-    let spatial = props.samples.iter().fold(1.0_f32, |v, s| v.max(s.position[0].abs()).max(s.position[2].abs()));
-    let tilt = props.samples.iter().fold(10.0_f32, |v, s| v.max(s.tilt_degrees[0].abs()).max(s.tilt_degrees[1].abs()));
-    let trajectory = props.samples.iter().map(|s| format!("{:.1},{:.1}",300.0+s.position[0]/spatial*210.0,235.0-s.position[2]/spatial*210.0)).collect::<Vec<_>>().join(" ");
-    let series = |value: fn(&PlotSample)->f32, scale: f32| props.samples.iter().map(|s| format!("{:.1},{:.1}",40.0+s.time_s/duration*540.0,130.0-value(s)/scale*105.0)).collect::<Vec<_>>().join(" ");
-    let tx=series(|s|s.tilt_degrees[0],tilt); let ty=series(|s|s.tilt_degrees[1],tilt);
-    let cx=series(|s|s.command[0],1.0); let ax=series(|s|s.actual[0],1.0); let cy=series(|s|s.command[1],1.0); let ay=series(|s|s.actual[1],1.0);
-    let cut=props.cutoff_s.filter(|t| *t<=duration).map(|t|40.0+t/duration*540.0);
-    html! { <><Card title={format!("{} trajectory",props.title)} icon="timeline"><p class="plot-legend">{"X and height use the same metres-per-pixel scale."}</p><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="30" y1="235" x2="580" y2="235" class="axis"/><line x1="300" y1="15" x2="300" y2="235" class="grid"/><polyline points={trajectory} fill="none" stroke="#1565c0" stroke-width="3"/><text x="485" y="252">{format!("±{:.1} m",spatial)}</text></svg></Card><Card title={format!("{} tilt",props.title)} icon="show_chart"><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={format!("{:.1}",130.0-5.0/tilt*105.0)} x2="580" y2={format!("{:.1}",130.0-5.0/tilt*105.0)} class="reference"/><line x1="40" y1={format!("{:.1}",130.0+5.0/tilt*105.0)} x2="580" y2={format!("{:.1}",130.0+5.0/tilt*105.0)} class="reference"/>{if let Some(x)=cut {html!{<line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/>}}else{Html::default()}}<polyline points={tx} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={ty} fill="none" stroke="#d32f2f" stroke-width="2"/></svg><p class="plot-legend"><span class="legend-x">{"X tilt"}</span><span class="legend-y">{"Y tilt"}</span>{" · gray: ±5°"}</p></Card><Card title={format!("{} TVC response",props.title)} icon="settings_input_component"><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="40" y1="25" x2="580" y2="25" class="reference"/><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1="235" x2="580" y2="235" class="reference"/><polyline points={cx} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={ax} fill="none" stroke="#ef6c00" stroke-width="2"/><polyline points={cy} fill="none" stroke="#d32f2f" stroke-width="2" stroke-dasharray="6 3"/><polyline points={ay} fill="none" stroke="#2e7d32" stroke-width="2" stroke-dasharray="6 3"/><text x="550" y="22">{"+1"}</text><text x="550" y="127">{"0"}</text><text x="550" y="232">{"−1"}</text></svg><p class="plot-legend"><span class="legend-x">{"X command"}</span><span class="legend-fit">{"X actual"}</span><span class="legend-y">{"Y command"}</span><span class="legend-fit">{"Y actual"}</span></p>{if let Some(hz)=props.average_hz {html!{<div class="status">{format!("Average physics loop: {:.1} Hz",hz)}</div>}}else{Html::default()}}</Card></> }
+    let spatial = props.samples.iter().fold(1.0_f32, |v, s| {
+        v.max(s.position[0].abs()).max(s.position[2].abs())
+    });
+    let tilt = TILT_GRAPH_LIMIT_DEGREES;
+    let trajectory = props
+        .samples
+        .iter()
+        .map(|s| {
+            format!(
+                "{:.1},{:.1}",
+                300.0 + s.position[0] / spatial * 210.0,
+                235.0 - s.position[2] / spatial * 210.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let series = |value: fn(&PlotSample) -> f32, scale: f32| {
+        props
+            .samples
+            .iter()
+            .map(|s| {
+                format!(
+                    "{:.1},{:.1}",
+                    40.0 + s.time_s / duration * 540.0,
+                    130.0 - value(s) / scale * 105.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let tx = series(|s| s.tilt_degrees[0], tilt);
+    let ty = series(|s| s.tilt_degrees[1], tilt);
+    let cx = series(|s| s.command[0], 1.0);
+    let ax = series(|s| s.actual[0], 1.0);
+    let cy = series(|s| s.command[1], 1.0);
+    let ay = series(|s| s.actual[1], 1.0);
+    let cut = props
+        .cutoff_s
+        .filter(|t| *t <= duration)
+        .map(|t| 40.0 + t / duration * 540.0);
+    html! { <><Card title={format!("{} trajectory",props.title)} icon="timeline"><p class="plot-legend">{"X and height use the same metres-per-pixel scale."}</p><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="30" y1="235" x2="580" y2="235" class="axis"/><line x1="300" y1="15" x2="300" y2="235" class="grid"/><polyline points={trajectory} fill="none" stroke="#1565c0" stroke-width="3"/><text x="485" y="252">{format!("±{:.1} m",spatial)}</text></svg></Card><Card title={format!("{} tilt",props.title)} icon="show_chart"><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={format!("{:.1}",130.0-5.0/tilt*105.0)} x2="580" y2={format!("{:.1}",130.0-5.0/tilt*105.0)} class="reference"/><line x1="40" y1={format!("{:.1}",130.0+5.0/tilt*105.0)} x2="580" y2={format!("{:.1}",130.0+5.0/tilt*105.0)} class="reference"/>{if let Some(x)=cut {html!{<line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/>}}else{Html::default()}}<polyline points={tx} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={ty} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="550" y="22">{"+10°"}</text><text x="550" y="232">{"−10°"}</text></svg><p class="plot-legend"><span class="legend-x">{"X tilt"}</span><span class="legend-y">{"Y tilt"}</span>{" · fixed ±10° scale · gray: ±5°"}</p></Card><Card title={format!("{} TVC response",props.title)} icon="settings_input_component"><svg class="simulation-plot" viewBox="0 0 600 260"><line x1="40" y1="25" x2="580" y2="25" class="reference"/><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1="235" x2="580" y2="235" class="reference"/><polyline points={cx} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={ax} fill="none" stroke="#ef6c00" stroke-width="2"/><polyline points={cy} fill="none" stroke="#d32f2f" stroke-width="2" stroke-dasharray="6 3"/><polyline points={ay} fill="none" stroke="#2e7d32" stroke-width="2" stroke-dasharray="6 3"/><text x="550" y="22">{"+1"}</text><text x="550" y="127">{"0"}</text><text x="550" y="232">{"−1"}</text></svg><p class="plot-legend"><span class="legend-x">{"X command"}</span><span class="legend-fit">{"X actual"}</span><span class="legend-y">{"Y command"}</span><span class="legend-fit">{"Y actual"}</span></p>{if let Some(hz)=props.average_hz {html!{<div class="status">{format!("Average physics loop: {:.1} Hz",hz)}</div>}}else{Html::default()}}</Card></> }
 }
 
 #[function_component]
@@ -1020,87 +1133,307 @@ fn RocketSimulation() -> Html {
         let configuration = configuration.clone();
         let loaded = loaded.clone();
         let hil_result = hil_result.clone();
-        use_effect_with_deps(move |message| {
-            if let Some(message) = &**message {
-                if let Ok(SocketMessage::State(next)) = serde_json::from_str::<SocketMessage>(message) {
-                    if !*loaded { configuration.set(next.simulation_configuration.clone()); loaded.set(true); }
-                    state.set(next);
+        use_effect_with_deps(
+            move |message| {
+                if let Some(message) = &**message {
+                    if let Ok(SocketMessage::State(next)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        if !*loaded {
+                            configuration.set(next.simulation_configuration.clone());
+                            loaded.set(true);
+                        }
+                        state.set(next);
+                    }
+                    if let Ok(SocketMessage::HilSimulationChunk(chunk)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        let mut result = if chunk.index == 0 {
+                            HilSimulationResult {
+                                samples: Vec::new(),
+                                missed_deadlines: chunk.missed_deadlines,
+                            }
+                        } else {
+                            (*hil_result).clone()
+                        };
+                        result.samples.extend(chunk.samples);
+                        result.missed_deadlines = chunk.missed_deadlines;
+                        hil_result.set(result);
+                    }
                 }
-                if let Ok(SocketMessage::HilSimulationChunk(chunk)) = serde_json::from_str::<SocketMessage>(message) {
-                    let mut result = if chunk.index == 0 { HilSimulationResult { samples: Vec::new(), missed_deadlines: chunk.missed_deadlines } } else { (*hil_result).clone() };
-                    result.samples.extend(chunk.samples);
-                    result.missed_deadlines = chunk.missed_deadlines;
-                    hil_result.set(result);
-                }
-            }
-            || ()
-        }, socket.message.clone());
+                || ()
+            },
+            socket.message.clone(),
+        );
     }
     let update = |field: &'static str| {
         let configuration = configuration.clone();
         Callback::from(move |value: f32| {
             let mut next = (*configuration).clone();
             match field {
-                "thrust" => next.thrust_newtons = value.max(0.0), "burn" => next.burn_time_s = value.max(0.0),
-                "angle" => next.max_tvc_angle_degrees = value.max(0.0), "rate" => next.max_tvc_rate_degrees_per_s = value.max(0.0),
+                "thrust" => next.thrust_newtons = value.max(0.0),
+                "burn" => next.burn_time_s = value.max(0.0),
+                "angle" => next.max_tvc_angle_degrees = value.max(0.0),
+                "rate" => next.max_tvc_rate_degrees_per_s = value.max(0.0),
                 "delay" => next.tvc_delay_ms = value.max(0.0).min(u16::MAX as f32).round() as u16,
-                "misalign_x" => next.tvc_misalignment_degrees[0] = value, "misalign_y" => next.tvc_misalignment_degrees[1] = value,
-                "axial" => next.drag_coefficient_axial = value.max(0.0), "sideways" => next.drag_coefficient_sideways = value.max(0.0),
-                "area" => next.reference_area_m2 = value.max(0.0), "cp" => next.center_of_pressure_offset_mm = value,
-                "wind_x" => next.wind_mps[0] = value, "wind_z" => next.wind_mps[2] = value,
-                "tilt_x" => next.initial_tilt_degrees[0] = value, "tilt_y" => next.initial_tilt_degrees[1] = value,
-                "p" => next.pid_gains[0] = value, "i" => next.pid_gains[1] = value, "d" => next.pid_gains[2] = value,
+                "misalign_x" => next.tvc_misalignment_degrees[0] = value,
+                "misalign_y" => next.tvc_misalignment_degrees[1] = value,
+                "axial" => next.drag_coefficient_axial = value.max(0.0),
+                "sideways" => next.drag_coefficient_sideways = value.max(0.0),
+                "area" => next.reference_area_m2 = value.max(0.0),
+                "cp" => next.center_of_pressure_offset_mm = value,
+                "wind_x" => next.wind_mps[0] = value,
+                "wind_z" => next.wind_mps[2] = value,
+                "tilt_x" => next.initial_tilt_degrees[0] = value,
+                "tilt_y" => next.initial_tilt_degrees[1] = value,
+                "p" => next.pid_gains[0] = value,
+                "i" => next.pid_gains[1] = value,
+                "d" => next.pid_gains[2] = value,
                 _ => {}
             }
             configuration.set(next);
         })
     };
-    let save = { let configuration = configuration.clone(); let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::SaveSimulationConfiguration { configuration: (*configuration).clone() })) };
-    let start = { let trajectory = trajectory.clone(); let configuration = configuration.clone(); let inertia = state.inertia_configuration.clone(); Callback::from(move |_| trajectory.set(run_rocket_preview(&inertia, &configuration))) };
-    let start_hil = { let configuration = configuration.clone(); let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::StartHilSimulation { configuration: (*configuration).clone() })) };
-    let show_simulation = { let show_hil=show_hil.clone(); Callback::from(move |_| show_hil.set(false)) };
-    let show_hil_result = { let show_hil=show_hil.clone(); Callback::from(move |_| show_hil.set(true)) };
+    let select_thrust_profile = {
+        let configuration = configuration.clone();
+        Callback::from(move |event: Event| {
+            let mut next = (*configuration).clone();
+            next.motor_thrust_profile = match event
+                .target_unchecked_into::<HtmlSelectElement>()
+                .value()
+                .as_str()
+            {
+                "klima-d3" => MotorThrustProfile::KlimaD3,
+                _ => MotorThrustProfile::Constant,
+            };
+            configuration.set(next);
+        })
+    };
+    let save = {
+        let configuration = configuration.clone();
+        let socket = socket.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SaveSimulationConfiguration {
+                    configuration: (*configuration).clone(),
+                },
+            )
+        })
+    };
+    let start = {
+        let trajectory = trajectory.clone();
+        let configuration = configuration.clone();
+        let inertia = state.inertia_configuration.clone();
+        Callback::from(move |_| trajectory.set(run_rocket_preview(&inertia, &configuration)))
+    };
+    let start_hil = {
+        let configuration = configuration.clone();
+        let socket = socket.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::StartHilSimulation {
+                    configuration: (*configuration).clone(),
+                },
+            )
+        })
+    };
+    let show_simulation = {
+        let show_hil = show_hil.clone();
+        Callback::from(move |_| show_hil.set(false))
+    };
+    let show_hil_result = {
+        let show_hil = show_hil.clone();
+        Callback::from(move |_| show_hil.set(true))
+    };
     let trajectory = &*trajectory;
-    let trajectory_scale = trajectory.iter().fold(1.0_f32, |scale, point| scale.max(point.position.x.abs()).max(point.position.z.abs()));
-    let trajectory_path = trajectory.iter().map(|point| format!("{:.1},{:.1}", 300.0 + point.position.x / trajectory_scale * 210.0, 235.0 - point.position.z / trajectory_scale * 210.0)).collect::<Vec<_>>().join(" ");
-    let cutoff = trajectory.iter().find(|point| point.time >= configuration.burn_time_s).copied();
-    let cutoff_trajectory = cutoff.map(|point| format!("{:.1},{:.1}", 300.0 + point.position.x / trajectory_scale * 210.0, 235.0 - point.position.z / trajectory_scale * 210.0));
-    let duration = trajectory.last().map(|point| point.time).unwrap_or(1.0).max(0.001);
+    let trajectory_scale = trajectory.iter().fold(1.0_f32, |scale, point| {
+        scale
+            .max(point.position.x.abs())
+            .max(point.position.z.abs())
+    });
+    let trajectory_path = trajectory
+        .iter()
+        .map(|point| {
+            format!(
+                "{:.1},{:.1}",
+                300.0 + point.position.x / trajectory_scale * 210.0,
+                235.0 - point.position.z / trajectory_scale * 210.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let burn_duration =
+        RocketParameters::from_configuration(&state.inertia_configuration, &configuration, 0.002)
+            .burn_duration_s();
+    let cutoff = trajectory
+        .iter()
+        .find(|point| point.time >= burn_duration)
+        .copied();
+    let cutoff_trajectory = cutoff.map(|point| {
+        format!(
+            "{:.1},{:.1}",
+            300.0 + point.position.x / trajectory_scale * 210.0,
+            235.0 - point.position.z / trajectory_scale * 210.0
+        )
+    });
+    let duration = trajectory
+        .last()
+        .map(|point| point.time)
+        .unwrap_or(1.0)
+        .max(0.001);
     let cutoff_time_x = cutoff.map(|point| 40.0 + point.time / duration * 540.0);
-    let tilt = |point: &SimulationLog| { let up = point.rotation.rotate(Vec3::UP); [(-up.y).atan2(up.z).to_degrees(), up.x.atan2(up.z).to_degrees()] };
-    let tilt_scale = trajectory.iter().fold(10.0_f32, |scale, point| { let value = tilt(point); scale.max(value[0].abs()).max(value[1].abs()) });
-    let tvc_scale = trajectory.iter().fold(configuration.max_tvc_angle_degrees.max(1.0), |scale, point| scale.max((point.tvc[0] * configuration.max_tvc_angle_degrees).abs()).max((point.tvc[1] * configuration.max_tvc_angle_degrees).abs()));
+    let tilt = |point: &SimulationLog| {
+        let up = point.rotation.rotate(Vec3::UP);
+        [
+            (-up.y).atan2(up.z).to_degrees(),
+            up.x.atan2(up.z).to_degrees(),
+        ]
+    };
+    let tilt_scale = trajectory.iter().fold(10.0_f32, |scale, point| {
+        let value = tilt(point);
+        scale.max(value[0].abs()).max(value[1].abs())
+    });
+    let tvc_scale = trajectory.iter().fold(
+        configuration.max_tvc_angle_degrees.max(1.0),
+        |scale, point| {
+            scale
+                .max((point.tvc[0] * configuration.max_tvc_angle_degrees).abs())
+                .max((point.tvc[1] * configuration.max_tvc_angle_degrees).abs())
+        },
+    );
     let tilt_reference_positive = 130.0 - 5.0 / tilt_scale * 105.0;
     let tilt_reference_negative = 130.0 + 5.0 / tilt_scale * 105.0;
     let tvc_reference_positive = 130.0 - configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
     let tvc_reference_negative = 130.0 + configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
     let tilt_x_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[0]);
     let tilt_y_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[1]);
-    let tvc_x_path = plot_series(trajectory, tvc_scale, |point| point.tvc[0] * configuration.max_tvc_angle_degrees);
-    let tvc_y_path = plot_series(trajectory, tvc_scale, |point| point.tvc[1] * configuration.max_tvc_angle_degrees);
+    let tvc_x_path = plot_series(trajectory, tvc_scale, |point| {
+        point.tvc[0] * configuration.max_tvc_angle_degrees
+    });
+    let tvc_y_path = plot_series(trajectory, tvc_scale, |point| {
+        point.tvc[1] * configuration.max_tvc_angle_degrees
+    });
     let final_point = trajectory.last().copied();
     let hil = &*hil_result;
-    let hil_average_loop_hz = hil.samples.first().zip(hil.samples.last()).and_then(|(first, last)| {
-        let elapsed_us = last.time_us.saturating_sub(first.time_us);
-        (elapsed_us > 0).then(|| (hil.samples.len().saturating_sub(1) as f32 * 10.0) / (elapsed_us as f32 / 1_000_000.0))
+    let hil_average_loop_hz =
+        hil.samples
+            .first()
+            .zip(hil.samples.last())
+            .and_then(|(first, last)| {
+                let elapsed_us = last.time_us.saturating_sub(first.time_us);
+                (elapsed_us > 0).then(|| {
+                    (hil.samples.len().saturating_sub(1) as f32 * 10.0)
+                        / (elapsed_us as f32 / 1_000_000.0)
+                })
+            });
+    let hil_duration = hil
+        .samples
+        .last()
+        .map(|sample| sample.scheduled_time_us.max(1) as f32)
+        .unwrap_or(1.0);
+    let hil_scale = hil.samples.iter().fold(1.0_f32, |scale, sample| {
+        scale
+            .max(sample.position_m[0].abs())
+            .max(sample.position_m[2].abs())
     });
-    let hil_duration = hil.samples.last().map(|sample| sample.scheduled_time_us.max(1) as f32).unwrap_or(1.0);
-    let hil_scale = hil.samples.iter().fold(1.0_f32, |scale, sample| scale.max(sample.position_m[0].abs()).max(sample.position_m[2].abs()));
-    let hil_trajectory = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 300.0 + sample.position_m[0] / hil_scale * 210.0, 235.0 - sample.position_m[2] / hil_scale * 210.0)).collect::<Vec<_>>().join(" ");
-    let hil_tilt_scale = hil.samples.iter().fold(5.0_f32, |scale, sample| scale.max(sample.orientation_xy_degrees[0].abs()).max(sample.orientation_xy_degrees[1].abs()));
-    let hil_tilt_x = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.orientation_xy_degrees[0] / hil_tilt_scale * 105.0)).collect::<Vec<_>>().join(" ");
-    let hil_tilt_y = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.orientation_xy_degrees[1] / hil_tilt_scale * 105.0)).collect::<Vec<_>>().join(" ");
-    let hil_tvc = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.tvc_command[0] * 105.0)).collect::<Vec<_>>().join(" ");
-    let hil_actual = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.tvc_actual[0] * 105.0)).collect::<Vec<_>>().join(" ");
-    let hil_tvc_y = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.tvc_command[1] * 105.0)).collect::<Vec<_>>().join(" ");
-    let hil_actual_y = hil.samples.iter().map(|sample| format!("{:.1},{:.1}", 40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0, 130.0 - sample.tvc_actual[1] * 105.0)).collect::<Vec<_>>().join(" ");
+    let hil_trajectory = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                300.0 + sample.position_m[0] / hil_scale * 210.0,
+                235.0 - sample.position_m[2] / hil_scale * 210.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_tilt_scale = hil.samples.iter().fold(5.0_f32, |scale, sample| {
+        scale
+            .max(sample.orientation_xy_degrees[0].abs())
+            .max(sample.orientation_xy_degrees[1].abs())
+    });
+    let hil_tilt_x = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.orientation_xy_degrees[0] / hil_tilt_scale * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_tilt_y = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.orientation_xy_degrees[1] / hil_tilt_scale * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_tvc = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.tvc_command[0] * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_actual = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.tvc_actual[0] * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_tvc_y = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.tvc_command[1] * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let hil_actual_y = hil
+        .samples
+        .iter()
+        .map(|sample| {
+            format!(
+                "{:.1},{:.1}",
+                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
+                130.0 - sample.tvc_actual[1] * 105.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     html! { <div class="simulation-page">
         <Card title="flight simulation" icon="rocket_launch">
             <p>{"This is an offline model preview; it never commands hardware. Mass, inertia, and gimbal-to-COM distance come from the Moment of inertia page."}</p>
             <div class="simulation-readonly"><span>{format!("Mass: {:.0} g", state.inertia_configuration.mass_g)}</span><span>{format!("COM / gimbal: {:.1} mm", state.inertia_configuration.center_of_mass_offset_mm)}</span><span>{format!("Iₓ/Iy: {:.3e} / {:.3e} kg·m²", state.inertia_configuration.moment_of_inertia_kgm2[0], state.inertia_configuration.moment_of_inertia_kgm2[1])}</span></div>
             <div class="config-grid">
-                <label>{"Thrust (N)"}<NumericInput value={configuration.thrust_newtons.to_string()} on_commit={update("thrust")}/></label>
-                <label>{"Burn time (s)"}<NumericInput value={configuration.burn_time_s.to_string()} on_commit={update("burn")}/></label>
+                <label>{"Motor thrust profile"}<select onchange={select_thrust_profile} value={match configuration.motor_thrust_profile { MotorThrustProfile::Constant => "constant", MotorThrustProfile::KlimaD3 => "klima-d3" }}><option value="constant">{"Constant thrust"}</option><option value="klima-d3">{"Klima D3 (manufacturer curve)"}</option></select></label>
+                { if configuration.motor_thrust_profile == MotorThrustProfile::Constant { html! { <><label>{"Thrust (N)"}<NumericInput value={configuration.thrust_newtons.to_string()} on_commit={update("thrust")}/></label><label>{"Burn time (s)"}<NumericInput value={configuration.burn_time_s.to_string()} on_commit={update("burn")}/></label></> } } else { html! { <div class="simulation-readonly"><span>{"Klima D3: 9.01 N peak · 6.26 s curve duration"}</span><span>{"Manufacturer RASP data via ThrustCurve.org"}</span></div> } } }
                 <label>{"Max TVC angle (°)"}<NumericInput value={configuration.max_tvc_angle_degrees.to_string()} on_commit={update("angle")}/></label>
                 <label>{"Max TVC rate (°/s)"}<NumericInput value={configuration.max_tvc_rate_degrees_per_s.to_string()} on_commit={update("rate")}/></label>
                 <label>{"TVC delay (ms)"}<NumericInput value={configuration.tvc_delay_ms.to_string()} on_commit={update("delay")}/></label>
@@ -1117,7 +1450,7 @@ fn RocketSimulation() -> Html {
             if !hil_result.samples.is_empty() { <div class="status">{format!("Latest HIL log: {} samples · average physics loop {:.1} Hz · {} missed 1 kHz deadlines", hil_result.samples.len(), hil_average_loop_hz.unwrap_or(0.0), hil_result.missed_deadlines)}</div> }
         </Card>
         <Card title="results" icon="timeline"><div class="axis-row"><button class={if !*show_hil {"selected"} else {""}} onclick={show_simulation}>{"Simulation"}</button><button class={if *show_hil {"selected"} else {""}} disabled={hil.samples.is_empty()} onclick={show_hil_result}>{"HIL"}</button></div></Card>
-        if *show_hil { <SimulationResultsView title="HIL" samples={hil_plot_samples(&hil.samples)} cutoff_s={Some(configuration.burn_time_s)} average_hz={hil_average_loop_hz}/> } else { <SimulationResultsView title="Simulation" samples={simulation_plot_samples(trajectory)} cutoff_s={Some(configuration.burn_time_s)}/> }
+        if *show_hil { <SimulationResultsView title="HIL" samples={hil_plot_samples(&hil.samples)} cutoff_s={Some(burn_duration)} average_hz={hil_average_loop_hz}/> } else { <SimulationResultsView title="Simulation" samples={simulation_plot_samples(trajectory)} cutoff_s={Some(burn_duration)}/> }
         if false && !hil.samples.is_empty() { <></> }
         if false && !trajectory.is_empty() { <><Card title="predicted trajectory" icon="timeline">
             <p class="plot-legend">{"X (lateral) and Z (height) use the same metres-per-pixel scale. Orange marks motor cut-off."}</p>
@@ -1203,6 +1536,7 @@ fn FlightDashboard() -> Html {
     }
     let state = &*state;
     let imu = &state.imu;
+    let battery = &state.battery;
     let format_axis = |values: &[f32; 3]| {
         format!(
             "X {:+.2}   Y {:+.2}   Z {:+.2}",
@@ -1213,6 +1547,10 @@ fn FlightDashboard() -> Html {
         <>
             <Card title="TVC flight computer" icon="rocket_launch">
                 <p>{"Live flight-sensor status. IMU values are refreshed in the dashboard at 4 Hz."}</p>
+            </Card>
+            <Card title="Battery" icon="battery_charging_full">
+                <div class={if battery.present { "battery-status" } else { "battery-status offline" }}>{if battery.present { "LIVE — MAX17048 FUEL GAUGE" } else { "OFFLINE — CHECK I²C FUEL GAUGE" }}</div>
+                <div class="battery-readings"><div><span>{"VOLTAGE"}</span><strong>{if battery.present { format!("{:.3} V", battery.voltage) } else { "—".to_owned() }}</strong></div><div><span>{"STATE OF CHARGE"}</span><strong>{if battery.present { format!("{:.0}%", battery.soc) } else { "—".to_owned() }}</strong></div></div>
             </Card>
             <Card title="ICM-42688-P inertial measurement" icon="sensors">
                 <div class="imu-status">{if imu.present { "ONLINE — 100 HZ ACQUISITION" } else { "OFFLINE — CHECK I²C SENSOR" }}</div>

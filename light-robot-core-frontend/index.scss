@@ -189,6 +189,12 @@ mwc-button {
 .imu-reading { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; }
 .imu-reading span, .imu-reading + small { font-size: .75rem; color: #555; }
 .imu-reading code { padding: 8px; border-radius: 4px; background: #f2f3f8; color: #20243d; font-size: .86rem; text-transform: none; white-space: pre; }
+.battery-status { margin-bottom: 12px; color: #237a35; font-size: .8rem; font-weight: 700; }
+.battery-status.offline { color: #b71c1c; }
+.battery-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.battery-readings div { display: flex; flex-direction: column; gap: 4px; padding: 10px; border-radius: 4px; background: #f2f3f8; }
+.battery-readings span { color: #555; font-size: .75rem; }
+.battery-readings strong { color: #20243d; font-size: 1.15rem; text-transform: none; }
 .inertia-summary { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; align-items: baseline; font-size: .84rem; }
 .inertia-summary span { color: #555; }
 .inertia-plot { width: 100%; height: 260px; margin-top: 16px; border: 1px solid #ddd; background: #fafafa; }
