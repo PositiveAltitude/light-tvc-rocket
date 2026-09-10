@@ -2027,12 +2027,28 @@ dependencies = [
  "heapless 0.9.3",
  "include_dir",
  "light-robot-core-api",
+ "light-robot-core-flight-control",
+ "light-robot-core-simulation",
  "log",
  "max170xx",
  "serde_json",
  "tokio",
  "trunk-build-time",
  "ws2812-esp32-rmt-driver",
+]
+
+[[package]]
+name = "light-robot-core-flight-control"
+version = "0.1.0"
+dependencies = [
+ "light-robot-core-simulation",
+]
+
+[[package]]
+name = "light-robot-core-simulation"
+version = "0.1.0"
+dependencies = [
+ "light-robot-core-api",
 ]
 
 [[package]]

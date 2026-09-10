@@ -3,6 +3,7 @@
 /light-robot-core-embedded/target/
 /light-robot-core-frontend/target/
 /light-robot-core-simulation/target/
+/light-robot-core-flight-control/target/
 /light-robot-core-embedded/wifi-password.secret
 /light-robot-core-embedded/wifi-ssid.secret
 /light-robot-core-embedded/.embuild/

@@ -648,12 +648,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-robot-core-flight-control"
+version = "0.1.0"
+dependencies = [
+ "light-robot-core-simulation",
+]
+
+[[package]]
 name = "light-robot-core-frontend"
 version = "0.0.1"
 dependencies = [
  "gloo 0.12.0",
  "gloo-timers 0.4.0",
  "light-robot-core-api",
+ "light-robot-core-flight-control",
+ "light-robot-core-simulation",
  "material-yew",
  "reqwasm",
  "serde",
@@ -663,6 +672,13 @@ dependencies = [
  "web-sys",
  "yew",
  "yew-hooks",
+]
+
+[[package]]
+name = "light-robot-core-simulation"
+version = "0.1.0"
+dependencies = [
+ "light-robot-core-api",
 ]
 
 [[package]]
