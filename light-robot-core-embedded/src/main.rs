@@ -1,5 +1,6 @@
 extern crate core;
 
+mod external_flash;
 mod imu;
 mod led_driver;
 mod server;
@@ -22,6 +23,8 @@ use esp_idf_hal::can::{CanDriver, Frame};
 use esp_idf_hal::cpu::Core;
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::Pull;
+use esp_idf_hal::spi::{config::Config as SpiConfig, SpiDeviceDriver, SpiDriverConfig};
+use esp_idf_hal::units::*;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
@@ -29,7 +32,10 @@ use esp_idf_svc::timer::EspTaskTimerService;
 use light_robot_core_api as api;
 use light_robot_core_api::*;
 use light_robot_core_flight_control::PidControlSystem;
-use light_robot_core_simulation::{ControlInputs, ControlSystem, Environment, NumericalSimulation, Quat, RocketParameters, RocketState, SensorData, Vec3};
+use light_robot_core_simulation::{
+    ControlInputs, ControlSystem, Environment, NumericalSimulation, Quat, RocketParameters,
+    RocketState, SensorData, Vec3,
+};
 use log::info;
 use max170xx::Max17048;
 use std::collections::HashSet;
@@ -47,7 +53,6 @@ const ORIENTATION_CHECK_MAX_COMMAND: f32 = 0.75;
 const ORIENTATION_CHECK_PERIOD: Duration = Duration::from_millis(20);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
-
 fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
     let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
     let delta = (counts_per_degree
@@ -246,10 +251,23 @@ fn main() -> ! {
             }
         }
     }
-    let saved_simulation_length = { servo_nvs.lock().unwrap().blob_len("simulation").ok().flatten() };
+    let saved_simulation_length = {
+        servo_nvs
+            .lock()
+            .unwrap()
+            .blob_len("simulation")
+            .ok()
+            .flatten()
+    };
     if let Some(length) = saved_simulation_length {
         let mut bytes = vec![0; length];
-        let saved_simulation = servo_nvs.lock().unwrap().get_blob("simulation", &mut bytes).ok().flatten().map(Vec::from);
+        let saved_simulation = servo_nvs
+            .lock()
+            .unwrap()
+            .get_blob("simulation", &mut bytes)
+            .ok()
+            .flatten()
+            .map(Vec::from);
         if let Some(bytes) = saved_simulation {
             if let Ok(configuration) = serde_json::from_slice(&bytes) {
                 state.lock().unwrap().simulation_configuration = configuration;
@@ -277,6 +295,44 @@ fn main() -> ! {
 
     let mut pyro2 = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio7).unwrap();
     pyro2.set_low().unwrap();
+
+    // External W25N01GV serial NAND.  GPIO14 (/WP) and GPIO9 (/HOLD) must be
+    // held high for ordinary single-SPI operation; IO0/IO1 are MOSI/MISO.
+    // Keep the pin drivers alive for the lifetime of the SPI device.
+    let mut _flash_wp = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio14).unwrap();
+    let mut _flash_hold = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio9).unwrap();
+    _flash_wp.set_high().unwrap();
+    _flash_hold.set_high().unwrap();
+    let flash_spi = SpiDeviceDriver::new_single(
+        peripherals.spi2,
+        peripherals.pins.gpio12,
+        peripherals.pins.gpio11,
+        Some(peripherals.pins.gpio13),
+        Some(peripherals.pins.gpio10),
+        &SpiDriverConfig::new(),
+        &SpiConfig::new().baudrate(10_u32.MHz().into()),
+    )
+    .unwrap();
+    let mut external_flash = external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
+    match external_flash
+        .reset()
+        .and_then(|_| external_flash.read_id())
+    {
+        Ok(id) => {
+            info!("External NAND ready: JEDEC {:02x?}", id);
+            match external_flash.clear_write_protection() {
+                Ok(protection) => {
+                    info!("External NAND write protection cleared: SR-1={:02x}", protection);
+                }
+                Err(error) => {
+                    info!("External NAND remains write-protected: {:?}", error);
+                }
+            }
+        }
+        Err(error) => {
+            info!("External NAND unavailable: {:?}", error);
+        }
+    }
 
     let i2c = esp_idf_hal::i2c::I2cDriver::new(
         peripherals.i2c0,
@@ -336,31 +392,38 @@ fn main() -> ! {
     // must never serialize JSON or enter NVS: both have deep ESP-IDF stacks.
     let (servo_save_sender, servo_save_receiver) = mpsc::sync_channel::<ServoCalibrationState>(1);
     let servo_save_nvs = servo_nvs.clone();
-    let default_persistence_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
+    let default_persistence_thread_config =
+        esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
     esp_idf_hal::task::thread::ThreadSpawnConfiguration {
         name: Some(CStr::from_bytes_with_nul(b"servo-save\0").unwrap()),
         stack_size: 32 * 1024,
         inherit: true,
         pin_to_core: Some(Core::Core0),
         ..Default::default()
-    }.set().unwrap();
-    thread::spawn(move || while let Ok(mut configuration) = servo_save_receiver.recv() {
-        // Runtime actuation is never persisted, regardless of the state at
-        // the moment the save button was pressed.
-        configuration.x_enabled = false;
-        configuration.y_enabled = false;
-        configuration.test_running = false;
-        configuration.orientation_check_running = false;
-        configuration.orientation_check_command = [0.0; 2];
-        match serde_json::to_vec(&configuration) {
-            Ok(bytes) => match servo_save_nvs.lock().unwrap().set_blob("axes", &bytes) {
-                Ok(()) => info!("Servo configuration saved to NVS flash"),
-                Err(error) => info!("Unable to save servo configuration: {:?}", error),
-            },
-            Err(error) => info!("Unable to serialize servo configuration: {:?}", error),
+    }
+    .set()
+    .unwrap();
+    thread::spawn(move || {
+        while let Ok(mut configuration) = servo_save_receiver.recv() {
+            // Runtime actuation is never persisted, regardless of the state at
+            // the moment the save button was pressed.
+            configuration.x_enabled = false;
+            configuration.y_enabled = false;
+            configuration.test_running = false;
+            configuration.orientation_check_running = false;
+            configuration.orientation_check_command = [0.0; 2];
+            match serde_json::to_vec(&configuration) {
+                Ok(bytes) => match servo_save_nvs.lock().unwrap().set_blob("axes", &bytes) {
+                    Ok(()) => info!("Servo configuration saved to NVS flash"),
+                    Err(error) => info!("Unable to save servo configuration: {:?}", error),
+                },
+                Err(error) => info!("Unable to serialize servo configuration: {:?}", error),
+            }
         }
     });
-    if let Some(default_persistence_thread_config) = default_persistence_thread_config { default_persistence_thread_config.set().unwrap(); }
+    if let Some(default_persistence_thread_config) = default_persistence_thread_config {
+        default_persistence_thread_config.set().unwrap();
+    }
     let inertia_capture_request_ = inertia_capture_request.clone();
     let inertia_capture_state = state.clone();
     let inertia_nvs = servo_nvs.clone();
@@ -508,21 +571,33 @@ fn main() -> ! {
                 }
             }
             Command::SetSimulationConfiguration { configuration } => {
-                inertia_capture_state.lock().unwrap().simulation_configuration = configuration.clone();
+                inertia_capture_state
+                    .lock()
+                    .unwrap()
+                    .simulation_configuration = configuration.clone();
             }
             Command::SaveSimulationConfiguration { configuration } => {
-                inertia_capture_state.lock().unwrap().simulation_configuration = configuration.clone();
+                inertia_capture_state
+                    .lock()
+                    .unwrap()
+                    .simulation_configuration = configuration.clone();
                 match serde_json::to_vec(configuration) {
                     Ok(bytes) => match inertia_nvs.lock().unwrap().set_blob("simulation", &bytes) {
                         Ok(()) => info!("Simulation configuration saved to NVS"),
                         Err(error) => info!("Unable to save simulation configuration: {:?}", error),
                     },
-                    Err(error) => info!("Unable to serialize simulation configuration: {:?}", error),
+                    Err(error) => {
+                        info!("Unable to serialize simulation configuration: {:?}", error)
+                    }
                 }
             }
             Command::StartHilSimulation { configuration } => {
                 let s = inertia_capture_state.lock().unwrap();
-                anyhow::ensure!(!s.servo_calibration.test_running && !s.servo_calibration.orientation_check_running, "HIL cannot start while another motor action is active");
+                anyhow::ensure!(
+                    !s.servo_calibration.test_running
+                        && !s.servo_calibration.orientation_check_running,
+                    "HIL cannot start while another motor action is active"
+                );
                 drop(s);
                 *hil_action.lock().unwrap() = CalibrationAction::StartHil(configuration.clone());
             }
@@ -1122,37 +1197,164 @@ fn main() -> ! {
                 CalibrationAction::StartHil(configuration) => {
                     // Bench-only HIL: CAN remains exclusively owned here for the
                     // full run. Servo feedback, not a gimbal model, drives TVC.
-                    let (x_config, y_config, inertia) = { let s = state_.lock().unwrap(); (s.servo_calibration.x.clone(), s.servo_calibration.y.clone(), s.inertia_configuration.clone()) };
-                    apply_servo_configuration(&mut can, ServoAxis::X, servo1_address_master, &x_config);
-                    apply_servo_configuration(&mut can, ServoAxis::Y, servo2_address_master, &y_config);
-                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::BrushedHoldPosition { position: flight_position_to_encoder(&x_config, 0.0) });
-                    can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::BrushedHoldPosition { position: flight_position_to_encoder(&y_config, 0.0) });
-                    { let mut s = state_.lock().unwrap(); s.hil_simulation.running = true; s.hil_simulation.missed_deadlines = 0; s.servo_calibration.x_enabled = true; s.servo_calibration.y_enabled = true; }
-                    let settling = Instant::now(); while settling.elapsed() < Duration::from_secs(2) { let _ = can.receive(1); }
-                    let env = Environment { max_time: 8.0, dt: 0.001, substeps: 1, wind: Vec3::new(configuration.wind_mps[0], configuration.wind_mps[1], configuration.wind_mps[2]), ..Environment::default() };
-                    let rocket = RocketParameters::from_configuration(&inertia, &configuration, env.dt);
-                    let radians = std::f32::consts::PI / 180.0; let mut model = RocketState::default(); model.rotation = Quat::axis_angle(Vec3::new(1.0,0.0,0.0), configuration.initial_tilt_degrees[0]*radians) * Quat::axis_angle(Vec3::new(0.0,1.0,0.0), configuration.initial_tilt_degrees[1]*radians);
-                    let mut physics = NumericalSimulation; let mut controller = PidControlSystem::new(configuration.pid_gains[0], configuration.pid_gains[1], configuration.pid_gains[2]); controller.reset(); controller.set_estimated_rotation(model.rotation); let mut command = ControlInputs { ignition: true, ..Default::default() }; let mut actual = [0.0;2]; let mut result = HilSimulationResult::default(); let started = Instant::now(); let mut cycle = 0_u32;
+                    let (x_config, y_config, inertia) = {
+                        let s = state_.lock().unwrap();
+                        (
+                            s.servo_calibration.x.clone(),
+                            s.servo_calibration.y.clone(),
+                            s.inertia_configuration.clone(),
+                        )
+                    };
+                    apply_servo_configuration(
+                        &mut can,
+                        ServoAxis::X,
+                        servo1_address_master,
+                        &x_config,
+                    );
+                    apply_servo_configuration(
+                        &mut can,
+                        ServoAxis::Y,
+                        servo2_address_master,
+                        &y_config,
+                    );
+                    can.can_transmit(
+                        servo1_address_master as u32,
+                        &ServoCommandFrame::BrushedHoldPosition {
+                            position: flight_position_to_encoder(&x_config, 0.0),
+                        },
+                    );
+                    can.can_transmit(
+                        servo2_address_master as u32,
+                        &ServoCommandFrame::BrushedHoldPosition {
+                            position: flight_position_to_encoder(&y_config, 0.0),
+                        },
+                    );
+                    {
+                        let mut s = state_.lock().unwrap();
+                        s.hil_simulation.running = true;
+                        s.hil_simulation.missed_deadlines = 0;
+                        s.servo_calibration.x_enabled = true;
+                        s.servo_calibration.y_enabled = true;
+                    }
+                    let settling = Instant::now();
+                    while settling.elapsed() < Duration::from_secs(2) {
+                        let _ = can.receive(1);
+                    }
+                    let env = Environment {
+                        max_time: 8.0,
+                        dt: 0.001,
+                        substeps: 1,
+                        wind: Vec3::new(
+                            configuration.wind_mps[0],
+                            configuration.wind_mps[1],
+                            configuration.wind_mps[2],
+                        ),
+                        ..Environment::default()
+                    };
+                    let rocket =
+                        RocketParameters::from_configuration(&inertia, &configuration, env.dt);
+                    let radians = std::f32::consts::PI / 180.0;
+                    let mut model = RocketState::default();
+                    model.rotation = Quat::axis_angle(
+                        Vec3::new(1.0, 0.0, 0.0),
+                        configuration.initial_tilt_degrees[0] * radians,
+                    ) * Quat::axis_angle(
+                        Vec3::new(0.0, 1.0, 0.0),
+                        configuration.initial_tilt_degrees[1] * radians,
+                    );
+                    let mut physics = NumericalSimulation;
+                    let mut controller = PidControlSystem::new(
+                        configuration.pid_gains[0],
+                        configuration.pid_gains[1],
+                        configuration.pid_gains[2],
+                    );
+                    controller.reset();
+                    controller.set_estimated_rotation(model.rotation);
+                    let mut command = ControlInputs {
+                        ignition: true,
+                        ..Default::default()
+                    };
+                    let mut actual = [0.0; 2];
+                    let mut result = HilSimulationResult::default();
+                    let started = Instant::now();
+                    let mut cycle = 0_u32;
                     while model.time < env.max_time {
-                        let scheduled = Duration::from_micros(cycle as u64 * 1000); while started.elapsed() < scheduled { std::hint::spin_loop(); }
-                        let elapsed = started.elapsed(); if elapsed > scheduled + Duration::from_micros(500) { result.missed_deadlines += 1; }
-                        while let Ok(frame) = can.receive(0) { if let Ok(ServoResponseFrame::State { position, .. }) = ServoResponseFrame::api_decode(frame.data()) { if frame.identifier() == servo1_address_slave as u32 { actual[0] = encoder_to_normalized_position(&x_config, position) * if x_config.reverse_control {-1.0} else {1.0}; } if frame.identifier() == servo2_address_slave as u32 { actual[1] = encoder_to_normalized_position(&y_config, position) * if y_config.reverse_control {-1.0} else {1.0}; } } }
+                        let scheduled = Duration::from_micros(cycle as u64 * 1000);
+                        while started.elapsed() < scheduled {
+                            std::hint::spin_loop();
+                        }
+                        let elapsed = started.elapsed();
+                        if elapsed > scheduled + Duration::from_micros(500) {
+                            result.missed_deadlines += 1;
+                        }
+                        while let Ok(frame) = can.receive(0) {
+                            if let Ok(ServoResponseFrame::State { position, .. }) =
+                                ServoResponseFrame::api_decode(frame.data())
+                            {
+                                if frame.identifier() == servo1_address_slave as u32 {
+                                    actual[0] = encoder_to_normalized_position(&x_config, position)
+                                        * if x_config.reverse_control { -1.0 } else { 1.0 };
+                                }
+                                if frame.identifier() == servo2_address_slave as u32 {
+                                    actual[1] = encoder_to_normalized_position(&y_config, position)
+                                        * if y_config.reverse_control { -1.0 } else { 1.0 };
+                                }
+                            }
+                        }
                         let control_tick = cycle % 10 == 0;
-                        if control_tick { command = controller.update(&SensorData { time: model.time, acceleration: model.acceleration, angular_velocity: model.angular_velocity, barometric_height: model.position.z }); }
+                        if control_tick {
+                            command = controller.update(&SensorData {
+                                time: model.time,
+                                acceleration: model.acceleration,
+                                angular_velocity: model.angular_velocity,
+                                barometric_height: model.position.z,
+                            });
+                        }
                         physics.step_with_actual_tvc(&mut model, command, actual, rocket, env);
-                        can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::BrushedHoldPosition { position: flight_position_to_encoder(&x_config, command.tvc[0]) }); can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::BrushedHoldPosition { position: flight_position_to_encoder(&y_config, command.tvc[1]) });
+                        can.can_transmit(
+                            servo1_address_master as u32,
+                            &ServoCommandFrame::BrushedHoldPosition {
+                                position: flight_position_to_encoder(&x_config, command.tvc[0]),
+                            },
+                        );
+                        can.can_transmit(
+                            servo2_address_master as u32,
+                            &ServoCommandFrame::BrushedHoldPosition {
+                                position: flight_position_to_encoder(&y_config, command.tvc[1]),
+                            },
+                        );
                         // Log at the same 100 Hz cadence as the controller.
                         // Physics and real-servo feedback still run at 1 kHz.
-                        if control_tick { let up = model.rotation.rotate(Vec3::UP); result.samples.push(HilSimulationSample { time_us: elapsed.as_micros() as u32, scheduled_time_us: scheduled.as_micros() as u32, position_m: [model.position.x,model.position.y,model.position.z], orientation_xy_degrees: [(-up.y).atan2(up.z).to_degrees(), up.x.atan2(up.z).to_degrees()], tvc_command: command.tvc, tvc_actual: actual }); }
+                        if control_tick {
+                            let up = model.rotation.rotate(Vec3::UP);
+                            result.samples.push(HilSimulationSample {
+                                time_us: elapsed.as_micros() as u32,
+                                scheduled_time_us: scheduled.as_micros() as u32,
+                                position_m: [model.position.x, model.position.y, model.position.z],
+                                orientation_xy_degrees: [
+                                    (-up.y).atan2(up.z).to_degrees(),
+                                    up.x.atan2(up.z).to_degrees(),
+                                ],
+                                tvc_command: command.tvc,
+                                tvc_actual: actual,
+                            });
+                        }
                         cycle += 1;
                     }
-                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable); can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
+                    can.can_transmit(servo1_address_master as u32, &ServoCommandFrame::Disable);
+                    can.can_transmit(servo2_address_master as u32, &ServoCommandFrame::Disable);
                     // Move the large 1 kHz log into shared storage. Cloning it
                     // here allocated ~180 KiB on the CAN task's internal heap
                     // and aborted immediately after a completed HIL run.
                     let missed_deadlines = result.missed_deadlines;
                     *hil_result_.lock().unwrap() = result;
-                    let mut s=state_.lock().unwrap(); s.hil_simulation.running=false; s.hil_simulation.missed_deadlines=missed_deadlines; s.hil_simulation.result_revision=s.hil_simulation.result_revision.wrapping_add(1); s.servo_calibration.x_enabled=false; s.servo_calibration.y_enabled=false;
+                    let mut s = state_.lock().unwrap();
+                    s.hil_simulation.running = false;
+                    s.hil_simulation.missed_deadlines = missed_deadlines;
+                    s.hil_simulation.result_revision =
+                        s.hil_simulation.result_revision.wrapping_add(1);
+                    s.servo_calibration.x_enabled = false;
+                    s.servo_calibration.y_enabled = false;
                 }
                 CalibrationAction::Save => {
                     let configuration = state_.lock().unwrap().servo_calibration.clone();
