@@ -26,6 +26,7 @@ impl Server {
         state: Arc<Mutex<State>>,
         test_data: Arc<Mutex<ServoTestResult>>,
         inertia_capture_result: Arc<Mutex<InertiaCaptureResult>>,
+        hil_result: Arc<Mutex<HilSimulationResult>>,
         command_handler: F,
     ) -> Result<Self>
     where
@@ -170,7 +171,8 @@ impl Server {
                     .write_all(serde_json::to_string(&test_data).unwrap().as_bytes())?;
                     Ok(())
                 },
-            )?;
+            )?
+            ;
 
         let ws_command_handler = command_handler.clone();
         let ws_sender_for_handler = ws_sender.clone();
@@ -201,6 +203,7 @@ impl Server {
         let ws_state = state.clone();
         let ws_test_data = test_data.clone();
         let ws_inertia_capture_result = inertia_capture_result.clone();
+        let ws_hil_result = hil_result.clone();
         let default_publisher_thread_config =
             esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
         esp_idf_hal::task::thread::ThreadSpawnConfiguration {
@@ -214,6 +217,7 @@ impl Server {
         thread::spawn(move || {
             let mut sent_test_revision = 0;
             let mut sent_inertia_result_revision = 0;
+            let mut sent_hil_result_revision = 0;
             loop {
                 FreeRtos::delay_ms(50);
                 let state = ws_state.lock().unwrap().clone();
@@ -242,6 +246,16 @@ impl Server {
                         let _ = sender.send(FrameType::Text(false), &message);
                     }
                     sent_inertia_result_revision = state.inertia_capture.result_revision;
+                }
+                if state.hil_simulation.result_revision != sent_hil_result_revision {
+                    let result = ws_hil_result.lock().unwrap();
+                    let total = result.samples.len().div_ceil(4) as u16;
+                    for (index, samples) in result.samples.chunks(4).enumerate() {
+                        let chunk = HilSimulationChunk { revision: state.hil_simulation.result_revision, index: index as u16, total, missed_deadlines: result.missed_deadlines, samples: samples.to_vec() };
+                        if let Ok(message) = serde_json::to_vec(&SocketMessage::HilSimulationChunk(chunk)) { let _ = sender.send(FrameType::Text(false), &message); }
+                        FreeRtos::delay_ms(2);
+                    }
+                    sent_hil_result_revision = state.hil_simulation.result_revision;
                 }
                 if let Ok(message) = serde_json::to_vec(&SocketMessage::State(state)) {
                     let _ = sender.send(FrameType::Text(false), &message);

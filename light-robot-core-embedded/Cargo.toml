@@ -35,6 +35,8 @@ embassy = ["esp-idf-svc/embassy-sync", "esp-idf-svc/critical-section", "esp-idf-
 
 [dependencies]
 light-robot-core-api = {path = "../light-robot-core-api"}
+light-robot-core-simulation = {path = "../light-robot-core-simulation"}
+light-robot-core-flight-control = {path = "../light-robot-core-flight-control"}
 bldc-servo-protocol = { git = "https://github.com/PositiveAltitude/BLDC-servo-v1.git", rev = "8c5e7bbc673a042bdb1d58115d9f2eda6bc9da41", package = "bldc-servo-protocol" }
 
 log = { version = "0.4.34", default-features = false }

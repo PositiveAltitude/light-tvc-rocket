@@ -16,6 +16,7 @@ pub struct State {
     /// inertia and the gimbal-to-COM distance deliberately live in
     /// `inertia_configuration`, since they are measured during onboarding.
     pub simulation_configuration: SimulationConfiguration,
+    #[serde(default)] pub hil_simulation: HilSimulationState,
     pub servo1: ServoState,
     pub servo2: ServoState,
     pub weight: i32,
@@ -119,6 +120,7 @@ pub enum SocketMessage {
     State(State),
     TestResult(ServoTestResult),
     InertiaCaptureResult(InertiaCaptureResult),
+    HilSimulationChunk(HilSimulationChunk),
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -255,6 +257,10 @@ pub struct SimulationConfiguration {
     pub initial_tilt_degrees: [f32; 2],
     pub pid_gains: [f32; 3],
 }
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationState { pub running: bool, pub result_revision: u32, pub missed_deadlines: u32 }
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationSample { pub time_us: u32, pub scheduled_time_us: u32, pub position_m: [f32; 3], pub orientation_xy_degrees: [f32; 2], pub tvc_command: [f32; 2], pub tvc_actual: [f32; 2] }
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationResult { pub samples: Vec<HilSimulationSample>, pub missed_deadlines: u32 }
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationChunk { pub revision: u32, pub index: u16, pub total: u16, pub missed_deadlines: u32, pub samples: Vec<HilSimulationSample> }
 
 impl Default for SimulationConfiguration {
     fn default() -> Self {
@@ -344,6 +350,7 @@ pub enum Command {
     SaveSimulationConfiguration {
         configuration: SimulationConfiguration,
     },
+    StartHilSimulation { configuration: SimulationConfiguration },
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]

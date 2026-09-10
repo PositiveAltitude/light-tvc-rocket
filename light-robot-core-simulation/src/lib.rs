@@ -74,11 +74,12 @@ impl NumericalSimulation {
         }
         log
     }
-    pub fn step(&mut self, state: &mut RocketState, requested: ControlInputs, rocket: RocketParameters, env: Environment) {
-        state.delay.push_back(requested); let input = if state.delay.len() > rocket.tvc_delay_steps { state.delay.pop_front().unwrap_or_default() } else { ControlInputs::default() };
-        let delta = env.dt * rocket.max_tvc_rate_rad_s;
-        state.tvc[0] += (input.tvc[0].clamp(-1.0, 1.0) - state.tvc[0]).clamp(-delta, delta);
-        state.tvc[1] += (input.tvc[1].clamp(-1.0, 1.0) - state.tvc[1]).clamp(-delta, delta);
+    pub fn step(&mut self, state: &mut RocketState, requested: ControlInputs, rocket: RocketParameters, env: Environment) { self.step_inner(state, requested, rocket, env, None); }
+    /// HIL path: servo position is measured from the real actuator, so no
+    /// gimbal delay/rate model is applied before the physics integration.
+    pub fn step_with_actual_tvc(&mut self, state: &mut RocketState, requested: ControlInputs, actual_tvc: [f32; 2], rocket: RocketParameters, env: Environment) { self.step_inner(state, requested, rocket, env, Some(actual_tvc)); }
+    fn step_inner(&mut self, state: &mut RocketState, requested: ControlInputs, rocket: RocketParameters, env: Environment, actual_tvc: Option<[f32; 2]>) {
+        let input = if let Some(actual) = actual_tvc { state.tvc = [actual[0].clamp(-1.0, 1.0), actual[1].clamp(-1.0, 1.0)]; requested } else { state.delay.push_back(requested); let input = if state.delay.len() > rocket.tvc_delay_steps { state.delay.pop_front().unwrap_or_default() } else { ControlInputs::default() }; let delta = env.dt * rocket.max_tvc_rate_rad_s; state.tvc[0] += (input.tvc[0].clamp(-1.0, 1.0) - state.tvc[0]).clamp(-delta, delta); state.tvc[1] += (input.tvc[1].clamp(-1.0, 1.0) - state.tvc[1]).clamp(-delta, delta); input };
         let thrust_value = if state.time < rocket.burn_time_s && input.ignition { rocket.thrust_n } else { 0.0 };
         let nozzle = Quat::axis_angle(Vec3::new(1.0, 0.0, 0.0), -(state.tvc[0] * rocket.max_tvc_angle_rad + rocket.tvc_misalignment_rad[0])) * Quat::axis_angle(Vec3::new(0.0, 1.0, 0.0), -(state.tvc[1] * rocket.max_tvc_angle_rad + rocket.tvc_misalignment_rad[1]));
         let body_thrust = nozzle.rotate(Vec3::new(0.0, 0.0, thrust_value)); let world_thrust = state.rotation.rotate(body_thrust);
