@@ -18,7 +18,6 @@ use bldc_servo_protocol::{
     ApiEncodeDecode, GeneralCommandFrame, GeneralResponseFrame, ServoCommandFrame,
     ServoResponseFrame,
 };
-use embedded_hal::spi::SpiDevice;
 use enumset::EnumSet;
 use esp_idf_hal::can::{CanDriver, Frame};
 use esp_idf_hal::cpu::Core;
@@ -54,84 +53,6 @@ const ORIENTATION_CHECK_MAX_COMMAND: f32 = 0.75;
 const ORIENTATION_CHECK_PERIOD: Duration = Duration::from_millis(20);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
-const FLASH_SELF_TEST_ARTIFACTS: [(&str, &[u8]); 3] = [
-    ("flash-self-test-a", b"TVC rocket external NAND artifact A"),
-    ("flash-self-test-b", b"TVC rocket external NAND artifact B"),
-    ("flash-self-test-c", b"TVC rocket external NAND artifact C"),
-];
-
-/// Bench-only persistence check. On an empty flash it writes three artifacts.
-/// On later boots it performs only scan/read/CRC verification, making a reboot
-/// a direct persistence test without adding further erase/program cycles.
-fn run_flash_self_test<SPI>(store: &mut external_flash::ArtifactStore<SPI>)
-where
-    SPI: SpiDevice<u8>,
-    SPI::Error: std::fmt::Debug,
-{
-    let mut present = 0;
-    for (name, _) in FLASH_SELF_TEST_ARTIFACTS {
-        match store.find(name) {
-            Ok(info) => {
-                present += 1;
-                info!(
-                    "External NAND self-test scan: found '{}' generation {} ({} bytes, {} blocks)",
-                    info.name, info.generation, info.size, info.blocks
-                );
-            }
-            Err(external_flash::ArtifactError::NotFound) => {
-                info!("External NAND self-test scan: '{}' is absent", name);
-            }
-            Err(error) => {
-                info!("External NAND self-test scan failed for '{}': {:?}", name, error);
-                return;
-            }
-        }
-    }
-
-    if present == 0 {
-        info!("External NAND self-test: empty; writing three artifacts");
-        for (name, bytes) in FLASH_SELF_TEST_ARTIFACTS {
-            let result = (|| {
-                let mut writer = store.begin(name)?;
-                writer.write(bytes)?;
-                writer.finish()
-            })();
-            match result {
-                Ok(info) => info!(
-                    "External NAND self-test write: '{}' generation {} committed ({} bytes)",
-                    info.name, info.generation, info.size
-                ),
-                Err(error) => {
-                    info!("External NAND self-test write failed for '{}': {:?}", name, error);
-                    return;
-                }
-            }
-        }
-        info!("External NAND self-test: reboot now to scan and read back the artifacts");
-    } else if present != FLASH_SELF_TEST_ARTIFACTS.len() {
-        info!("External NAND self-test: partial artifact set; preserving it and not writing");
-    } else {
-        info!("External NAND self-test: all artifacts found; reading and validating");
-        for (name, expected) in FLASH_SELF_TEST_ARTIFACTS {
-            let mut actual = Vec::new();
-            match store.read(name, |chunk| actual.extend_from_slice(chunk)) {
-                Ok(()) if actual == expected => info!(
-                    "External NAND self-test read: '{}' verified ({} bytes)",
-                    name,
-                    actual.len()
-                ),
-                Ok(()) => info!(
-                    "External NAND self-test read mismatch for '{}': expected {} bytes, got {}",
-                    name,
-                    expected.len(),
-                    actual.len()
-                ),
-                Err(error) => info!("External NAND self-test read failed for '{}': {:?}", name, error),
-            }
-        }
-    }
-}
-
 fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
     let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
     let delta = (counts_per_degree
@@ -393,7 +314,7 @@ fn main() -> ! {
     )
     .unwrap();
     let mut external_flash = external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
-    let external_flash_ready = match external_flash
+    match external_flash
         .reset()
         .and_then(|_| external_flash.read_id())
     {
@@ -402,21 +323,15 @@ fn main() -> ! {
             match external_flash.clear_write_protection() {
                 Ok(protection) => {
                     info!("External NAND write protection cleared: SR-1={:02x}", protection);
-                    true
                 }
                 Err(error) => {
                     info!("External NAND remains write-protected: {:?}", error);
-                    false
                 }
             }
         }
         Err(error) => {
             info!("External NAND unavailable: {:?}", error);
-            false
         }
-    };
-    if external_flash_ready {
-        run_flash_self_test(&mut external_flash);
     }
 
     let i2c = esp_idf_hal::i2c::I2cDriver::new(
