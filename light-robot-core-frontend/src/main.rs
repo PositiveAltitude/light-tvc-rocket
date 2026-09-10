@@ -1,30 +1,29 @@
 mod components;
 
 use crate::components::*;
-use gloo::timers::callback::{Interval, Timeout};
+use gloo::timers::callback::Timeout;
 use light_robot_core_api::*;
 use light_robot_core_flight_control::PidControlSystem;
 use light_robot_core_simulation::{
     Environment, NumericalSimulation, Quat, RocketParameters, RocketState, SimulationLog, Vec3,
 };
 use material_yew::{MatTab, MatTabBar};
-use reqwasm::http::Request;
-use serde::de::DeserializeOwned;
-use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement};
 use yew::prelude::*;
 use yew_hooks::prelude::*;
 
-const COMMAND_URI: &str = "http://lrc.local/command";
 const TEST_COLORS: [&str; 5] = ["#1565c0", "#d32f2f", "#2e7d32", "#7b1fa2", "#ef6c00"];
 const TILT_GRAPH_LIMIT_DEGREES: f32 = 10.0;
 
-fn send_command(socket: &UseWebSocketHandle, command: Command) {
-    socket.send(serde_json::to_string(&command).unwrap());
+#[derive(Clone, PartialEq)]
+struct AppConnection {
+    state: UseStateHandle<State>,
+    message: UseStateHandle<Option<String>>,
+    send_command: Callback<Command>,
 }
 
-async fn fetch<T: DeserializeOwned>(url: &str) -> Option<T> {
-    Request::get(url).send().await.ok()?.json::<T>().await.ok()
+fn send_command(sender: &Callback<Command>, command: Command) {
+    sender.emit(command);
 }
 
 #[derive(Clone, PartialEq)]
@@ -82,7 +81,8 @@ fn device_name(device: &ServoDeviceId) -> String {
 
 #[function_component]
 fn ServoCalibration() -> Html {
-    let state = use_state_eq(State::default);
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
     let axis = use_state(|| ServoAxis::X);
     let config = use_state(ServoConfiguration::default);
     let enabled = use_state(|| false);
@@ -92,7 +92,7 @@ fn ServoCalibration() -> Html {
     let selected_device = use_state(|| 0_usize);
     let draft = use_state(|| ConfigDraft::from_config(&ServoConfiguration::default()));
     let configuration_loaded = use_state(|| false);
-    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    let socket = connection.send_command.clone();
     {
         let state = state.clone();
         let tests = tests.clone();
@@ -132,7 +132,7 @@ fn ServoCalibration() -> Html {
                 }
                 || ()
             },
-            socket.message.clone(),
+            connection.message.clone(),
         );
     }
     let select_axis = |new_axis: ServoAxis| {
@@ -713,13 +713,14 @@ impl PendulumFit {
 
 #[function_component]
 fn MomentOfInertia() -> Html {
-    let state = use_state_eq(State::default);
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
     let result = use_state_eq(InertiaCaptureResult::default);
     let configuration = use_state_eq(InertiaConfiguration::default);
     let configuration_loaded = use_state(|| false);
     let fit = use_state_eq(|| None::<PendulumFit>);
     let published_fit_iteration = use_state(|| None::<u32>);
-    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    let socket = connection.send_command.clone();
     {
         let state = state.clone();
         let result = result.clone();
@@ -756,7 +757,7 @@ fn MomentOfInertia() -> Html {
                 }
                 || ()
             },
-            socket.message.clone(),
+            connection.message.clone(),
         );
     }
     let fitting = fit.as_ref().map(|fit| !fit.finished).unwrap_or(false);
@@ -1121,13 +1122,14 @@ fn SimulationResultsView(props: &SimulationResultsProps) -> Html {
 
 #[function_component]
 fn RocketSimulation() -> Html {
-    let state = use_state_eq(State::default);
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
     let configuration = use_state_eq(SimulationConfiguration::default);
     let trajectory = use_state(Vec::<SimulationLog>::new);
     let hil_result = use_state_eq(HilSimulationResult::default);
     let show_hil = use_state(|| false);
     let loaded = use_state(|| false);
-    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    let socket = connection.send_command.clone();
     {
         let state = state.clone();
         let configuration = configuration.clone();
@@ -1163,7 +1165,7 @@ fn RocketSimulation() -> Html {
                 }
                 || ()
             },
-            socket.message.clone(),
+            connection.message.clone(),
         );
     }
     let update = |field: &'static str| {
@@ -1468,8 +1470,9 @@ fn RocketSimulation() -> Html {
 
 #[function_component]
 fn ServoOrientationCheck() -> Html {
-    let state = use_state_eq(State::default);
-    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
+    let socket = connection.send_command.clone();
     {
         let state = state.clone();
         use_effect_with_deps(
@@ -1483,7 +1486,7 @@ fn ServoOrientationCheck() -> Html {
                 }
                 || ()
             },
-            socket.message.clone(),
+            connection.message.clone(),
         );
     }
     let toggle = {
@@ -1514,26 +1517,8 @@ fn ServoOrientationCheck() -> Html {
 
 #[function_component]
 fn FlightDashboard() -> Html {
-    let state = use_state_eq(State::default);
-    {
-        let state = state.clone();
-        use_effect_with_deps(
-            move |_| {
-                let refresh = move || {
-                    let state = state.clone();
-                    spawn_local(async move {
-                        if let Some(next_state) = fetch::<State>("/state").await {
-                            state.set(next_state);
-                        }
-                    });
-                };
-                refresh();
-                let interval = Interval::new(250, refresh);
-                move || drop(interval)
-            },
-            (),
-        );
-    }
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
     let state = &*state;
     let imu = &state.imu;
     let battery = &state.battery;
@@ -1564,12 +1549,13 @@ fn FlightDashboard() -> Html {
 
 #[function_component]
 fn WifiSettings() -> Html {
-    let state = use_state_eq(State::default);
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
     let ssid = use_state(String::new);
     let password = use_state(String::new);
     let saved = use_state(|| false);
     let restart_armed = use_state(|| false);
-    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    let socket = connection.send_command.clone();
     {
         let state = state.clone();
         let ssid = ssid.clone();
@@ -1587,7 +1573,7 @@ fn WifiSettings() -> Html {
                 }
                 || ()
             },
-            socket.message.clone(),
+            connection.message.clone(),
         );
     }
     let update_ssid = {
@@ -1654,11 +1640,35 @@ fn WifiSettings() -> Html {
 #[function_component]
 fn App() -> Html {
     let tab = use_state(|| 0_usize);
+    let state = use_state_eq(State::default);
+    let message = use_state_eq(|| None::<String>);
+    let socket = use_websocket("ws://lrc.local/ws".to_owned());
+    {
+        let state = state.clone();
+        let message = message.clone();
+        use_effect_with_deps(
+            move |incoming| {
+                if let Some(incoming) = &**incoming {
+                    if let Ok(SocketMessage::State(next)) = serde_json::from_str::<SocketMessage>(incoming) {
+                        state.set(next);
+                    }
+                    message.set(Some(incoming.clone()));
+                }
+                || ()
+            },
+            socket.message.clone(),
+        );
+    }
+    let send_command = {
+        let socket = socket.clone();
+        Callback::from(move |command| socket.send(serde_json::to_string(&command).unwrap()))
+    };
+    let connection = AppConnection { state, message, send_command };
     let activated = {
         let tab = tab.clone();
         Callback::from(move |id| tab.set(id))
     };
-    html! { <div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="school"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><FlightDashboard/></TabPage><TabPage id=1 current_id={*tab}><RocketOnboarding/></TabPage><TabPage id=2 current_id={*tab}><WifiSettings/></TabPage></div></div> }
+    html! { <ContextProvider<AppConnection> context={connection}><div class="content-frame"><div class="content-root"><MatTabBar onactivated={activated}><MatTab min_width=true icon="dashboard"/><MatTab min_width=true icon="school"/><MatTab min_width=true icon="settings"/></MatTabBar><TabPage id=0 current_id={*tab}><FlightDashboard/></TabPage><TabPage id=1 current_id={*tab}><RocketOnboarding/></TabPage><TabPage id=2 current_id={*tab}><WifiSettings/></TabPage></div></div></ContextProvider<AppConnection>> }
 }
 fn main() {
     yew::Renderer::<App>::new().render();

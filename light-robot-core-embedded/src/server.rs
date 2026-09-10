@@ -1,13 +1,10 @@
 use light_robot_core_api::*;
-use std::io;
-use std::io::ErrorKind;
-
-use anyhow::{Error, Result};
+use anyhow::Result;
 use esp_idf_hal::cpu::Core;
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::io::EspIOError;
 use esp_idf_svc::http::server::ws::EspHttpWsDetachedSender;
-use esp_idf_svc::http::server::{Connection, EspHttpServer, Request};
+use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::ws::FrameType;
 use esp_idf_sys::EspError;
 use include_dir::{include_dir, Dir};
@@ -46,10 +43,7 @@ impl Server {
 
         let mut server = EspHttpServer::new(&conf)?;
         let command_handler = Arc::new(command_handler);
-        let rest_command_handler = command_handler.clone();
         let ws_sender = Arc::new(Mutex::new(None::<EspHttpWsDetachedSender>));
-        let rest_state = state.clone();
-        let rest_test_data = test_data.clone();
 
         fn serve_file<'a>(
             server: &'a mut EspHttpServer,
@@ -92,91 +86,8 @@ impl Server {
             Ok(())
         }
 
-        server
-            .fn_handler(
-                "/state",
-                Method::Get,
-                move |req| -> Result<(), EspIOError> {
-                    let state = rest_state.lock().unwrap().to_owned();
-
-                    req.into_response(
-                        200,
-                        None,
-                        &[
-                            ("Content-Type", "application/json"),
-                            ("Access-Control-Allow-Origin", "*"),
-                        ],
-                    )?
-                    .write_all(serde_json::to_string(&state).unwrap().as_bytes())?;
-                    Ok(())
-                },
-            )?
-            .fn_handler(
-                "/command",
-                Method::Post,
-                move |mut req| -> Result<(), EspIOError> {
-                    struct ReqRead<'a, A> {
-                        req: &'a mut Request<A>,
-                    }
-
-                    impl<'a, A> io::Read for ReqRead<'a, A>
-                    where
-                        A: Connection,
-                    {
-                        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                            self.req
-                                .read(buf)
-                                .map_err(|e| io::Error::new(ErrorKind::BrokenPipe, ""))
-                        }
-                    }
-
-                    let command = serde_json::from_reader::<_, Command>(ReqRead { req: &mut req });
-
-                    //TODO headers (cross-origin, content-type)
-                    match command {
-                        Ok(command) => {
-                            match rest_command_handler(&command) {
-                                Ok(_) => {
-                                    req.into_ok_response()?;
-                                }
-                                Err(_) => {
-                                    req.into_status_response(500)?;
-                                }
-                            }
-
-                            Ok(())
-                        }
-                        Err(_) => req
-                            .into_response(400, Some("Unable to parse command"), &[])
-                            .map(|_| ()),
-                    }?;
-
-                    Ok(())
-                },
-            )?
-            .fn_handler(
-                "/test_result",
-                Method::Get,
-                move |req| -> Result<(), EspIOError> {
-                    let test_data = rest_test_data.lock().unwrap().to_owned();
-
-                    req.into_response(
-                        200,
-                        None,
-                        &[
-                            ("Content-Type", "application/json"),
-                            ("Access-Control-Allow-Origin", "*"),
-                        ],
-                    )?
-                    .write_all(serde_json::to_string(&test_data).unwrap().as_bytes())?;
-                    Ok(())
-                },
-            )?
-            ;
-
         let ws_command_handler = command_handler.clone();
         let ws_sender_for_handler = ws_sender.clone();
-        let ws_state = state.clone();
         server.ws_handler("/ws", None, move |connection| -> Result<()> {
             if connection.is_new() {
                 // Keep the HTTPD handshake small. The background publisher
