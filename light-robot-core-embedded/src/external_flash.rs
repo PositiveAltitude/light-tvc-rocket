@@ -6,6 +6,7 @@
 
 use embedded_hal::spi::{Operation, SpiDevice};
 use esp_idf_hal::delay::FreeRtos;
+use log::info;
 
 pub const PAGE_SIZE: usize = 2_048;
 pub const SPARE_SIZE: usize = 64;
@@ -251,6 +252,8 @@ struct BlockRecord {
 /// visible only when its final block is committed.
 pub struct ArtifactStore<SPI> {
     flash: W25N01GV<SPI>,
+    records: Option<Vec<BlockRecord>>,
+    occupied_blocks: Option<Vec<bool>>,
 }
 
 impl<SPI> ArtifactStore<SPI>
@@ -258,7 +261,11 @@ where
     SPI: SpiDevice<u8>,
 {
     pub fn new(flash: W25N01GV<SPI>) -> Self {
-        Self { flash }
+        Self {
+            flash,
+            records: None,
+            occupied_blocks: None,
+        }
     }
 
     pub fn into_inner(self) -> W25N01GV<SPI> {
@@ -298,11 +305,11 @@ where
         })
     }
 
-    /// Finds the most recent complete version. The scan reads page zero of
-    /// each non-bad block, as specified by the on-flash layout.
+    /// Finds the most recent complete version. The first call scans metadata
+    /// page zero of each non-bad block; later calls use the boot-time index.
     pub fn find(&mut self, name: &str) -> Result<ArtifactInfo, ArtifactError<SPI::Error>> {
         validate_name(name)?;
-        let mut records = self.scan_records()?;
+        let mut records = self.records_snapshot()?;
         records.retain(|record| record.name == name);
         let final_record = records
             .iter()
@@ -334,7 +341,7 @@ where
         mut consumer: impl FnMut(&[u8]),
     ) -> Result<(), ArtifactError<SPI::Error>> {
         let info = self.find(name)?;
-        let mut records = self.scan_records()?;
+        let mut records = self.records_snapshot()?;
         records.retain(|record| record.name == name && record.generation == info.generation);
         let mut remaining = info.size as usize;
         let mut page = [0xff; PAGE_SIZE];
@@ -377,7 +384,7 @@ where
     pub fn erase(&mut self, name: &str) -> Result<(), ArtifactError<SPI::Error>> {
         validate_name(name)?;
         for record in self
-            .scan_records()?
+            .records_snapshot()?
             .into_iter()
             .filter(|record| record.name == name)
         {
@@ -385,12 +392,14 @@ where
                 .erase_block(record.physical_block)
                 .map_err(ArtifactError::Flash)?;
         }
+        self.records = None;
+        self.occupied_blocks = None;
         Ok(())
     }
 
     fn next_generation(&mut self, name: &str) -> Result<u32, ArtifactError<SPI::Error>> {
         Ok(self
-            .scan_records()?
+            .records_snapshot()?
             .iter()
             .filter(|record| record.name == name)
             .map(|record| record.generation)
@@ -405,32 +414,21 @@ where
         generation: u32,
         logical_index: u16,
     ) -> Result<u16, ArtifactError<SPI::Error>> {
-        let mut page = [0xff; PAGE_SIZE];
+        self.ensure_index()?;
         for block in 0..BLOCK_COUNT {
-            if block % 8 == 0 {
-                FreeRtos::delay_ms(1);
-            }
-            if self
-                .flash
-                .is_bad_block(block)
-                .map_err(ArtifactError::Flash)?
-            {
+            if self.occupied_blocks.as_ref().expect("index initialized")[block as usize] {
                 continue;
             }
             self.flash
-                .read_page(block * PAGES_PER_BLOCK, &mut page)
+                .erase_block(block)
                 .map_err(ArtifactError::Flash)?;
-            if page.iter().all(|byte| *byte == 0xff) {
-                self.flash
-                    .erase_block(block)
-                    .map_err(ArtifactError::Flash)?;
-                let mut header = [0xff; METADATA_SECTOR_SIZE];
-                encode_header(&mut header, name, generation, logical_index)?;
-                self.flash
-                    .program_page_at(block * PAGES_PER_BLOCK, 0, &header)
-                    .map_err(ArtifactError::Flash)?;
-                return Ok(block);
-            }
+            let mut header = [0xff; METADATA_SECTOR_SIZE];
+            encode_header(&mut header, name, generation, logical_index)?;
+            self.flash
+                .program_page_at(block * PAGES_PER_BLOCK, 0, &header)
+                .map_err(ArtifactError::Flash)?;
+            self.occupied_blocks.as_mut().expect("index initialized")[block as usize] = true;
+            return Ok(block);
         }
         Err(ArtifactError::NoSpace)
     }
@@ -438,6 +436,9 @@ where
     fn commit_block(
         &mut self,
         block: u16,
+        name: &str,
+        generation: u32,
+        logical_index: u16,
         size: u32,
         crc32: u32,
         is_final: bool,
@@ -451,11 +452,34 @@ where
         commit[16..24].copy_from_slice(&total_size.to_le_bytes());
         self.flash
             .program_page_at(block * PAGES_PER_BLOCK, COMMIT_COLUMN, &commit)
-            .map_err(ArtifactError::Flash)
+            .map_err(ArtifactError::Flash)?;
+        self.records
+            .as_mut()
+            .expect("artifact writes initialize the index")
+            .push(BlockRecord {
+                physical_block: block,
+                name: name.to_owned(),
+                generation,
+                logical_index,
+                size,
+                crc32,
+                is_final,
+                total_size,
+            });
+        Ok(())
     }
 
-    fn scan_records(&mut self) -> Result<Vec<BlockRecord>, ArtifactError<SPI::Error>> {
+    fn records_snapshot(&mut self) -> Result<Vec<BlockRecord>, ArtifactError<SPI::Error>> {
+        self.ensure_index()?;
+        Ok(self.records.as_ref().expect("index initialized").clone())
+    }
+
+    fn ensure_index(&mut self) -> Result<(), ArtifactError<SPI::Error>> {
+        if self.records.is_some() {
+            return Ok(());
+        }
         let mut records = Vec::new();
+        let mut occupied_blocks = vec![false; BLOCK_COUNT as usize];
         let mut page = [0xff; PAGE_SIZE];
         for block in 0..BLOCK_COUNT {
             if block % 8 == 0 {
@@ -466,11 +490,13 @@ where
                 .is_bad_block(block)
                 .map_err(ArtifactError::Flash)?
             {
+                occupied_blocks[block as usize] = true;
                 continue;
             }
             self.flash
                 .read_page(block * PAGES_PER_BLOCK, &mut page)
                 .map_err(ArtifactError::Flash)?;
+            occupied_blocks[block as usize] = !page.iter().all(|byte| *byte == 0xff);
             let Some((name, generation, logical_index)) =
                 decode_header(&page[..METADATA_SECTOR_SIZE])
             else {
@@ -495,7 +521,19 @@ where
                 total_size,
             });
         }
-        Ok(records)
+        self.records = Some(records);
+        self.occupied_blocks = Some(occupied_blocks);
+        info!(
+            "External NAND metadata index ready: {} committed segments across {} occupied blocks",
+            self.records.as_ref().expect("index initialized").len(),
+            self.occupied_blocks
+                .as_ref()
+                .expect("index initialized")
+                .iter()
+                .filter(|occupied| **occupied)
+                .count()
+        );
+        Ok(())
     }
 }
 
@@ -549,6 +587,9 @@ where
         }
         self.store.commit_block(
             self.block,
+            &self.name,
+            self.generation,
+            self.logical_index,
             self.block_size,
             self.block_crc.finish(),
             true,
@@ -581,6 +622,9 @@ where
     fn advance_block(&mut self) -> Result<(), ArtifactError<SPI::Error>> {
         self.store.commit_block(
             self.block,
+            &self.name,
+            self.generation,
+            self.logical_index,
             self.block_size,
             self.block_crc.finish(),
             false,
