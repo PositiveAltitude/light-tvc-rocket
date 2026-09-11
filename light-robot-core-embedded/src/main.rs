@@ -53,6 +53,8 @@ const ORIENTATION_CHECK_MAX_COMMAND: f32 = 0.75;
 const ORIENTATION_CHECK_PERIOD: Duration = Duration::from_millis(20);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// MAX17048 telemetry is intentionally low-rate to minimize shared-I²C load.
+const BATTERY_SAMPLE_PERIOD: Duration = Duration::from_millis(250);
 fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
     let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
     let delta = (counts_per_degree
@@ -346,8 +348,50 @@ fn main() -> ! {
     let i2c = SharedI2c::new(i2c);
     let mut max17048 = Max17048::new(i2c.clone());
 
-    info!("SOC: {:.2}", max17048.soc().unwrap());
+    match (max17048.voltage(), max17048.soc()) {
+        (Ok(voltage), Ok(soc)) => info!("Battery: {:.3} V, {:.1}% SOC", voltage, soc),
+        (Err(error), _) | (_, Err(error)) => info!("MAX17048 initial read failed: {:?}", error),
+    }
     info!("MAX -- OK");
+
+    let battery_state = state.clone();
+    let default_battery_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
+    esp_idf_hal::task::thread::ThreadSpawnConfiguration {
+        name: Some(CStr::from_bytes_with_nul(b"battery-sampler\0").unwrap()),
+        stack_size: 8 * 1024,
+        inherit: true,
+        pin_to_core: Some(Core::Core0),
+        ..Default::default()
+    }
+    .set()
+    .unwrap();
+    thread::spawn(move || {
+        let mut failure_reported = false;
+        loop {
+            match (max17048.voltage(), max17048.soc(), max17048.charge_rate()) {
+                (Ok(voltage), Ok(soc), Ok(charge_rate)) => {
+                    battery_state.lock().unwrap().battery = BatteryState {
+                        present: true,
+                        voltage,
+                        soc: soc.clamp(0.0, 100.0),
+                        charge_rate,
+                    };
+                    failure_reported = false;
+                }
+                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    if !failure_reported {
+                        info!("MAX17048 telemetry read failed: {:?}", error);
+                        failure_reported = true;
+                    }
+                    battery_state.lock().unwrap().battery.present = false;
+                }
+            }
+            FreeRtos::delay_ms(BATTERY_SAMPLE_PERIOD.as_millis() as u32);
+        }
+    });
+    if let Some(default_battery_thread_config) = default_battery_thread_config {
+        default_battery_thread_config.set().unwrap();
+    }
 
     let mut led_driver: LedDriver<'static> =
         LedDriver::new(peripherals.pins.gpio8, peripherals.rmt.channel0).unwrap();
