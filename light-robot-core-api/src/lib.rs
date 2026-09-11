@@ -166,7 +166,10 @@ impl Default for WifiConnectionType {
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PyroChannelState {
     pub fire: bool,
+    /// Voltage at the MCU-side of the continuity-test divider.
     pub test_voltage: f32,
+    /// True when the continuity-test voltage indicates an attached igniter.
+    pub continuity: bool,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -177,8 +180,16 @@ pub struct PyroState {
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct BarometerState {
+    pub present: bool,
+    /// Height above the standard-atmosphere reference pressure, in metres.
     pub altitude: f32,
+    /// BMP280 compensated die temperature, in °C.
     pub temperature: f32,
+    /// BMP280 compensated absolute pressure, in hPa.
+    pub pressure_hpa: f32,
+    /// Monotonically wrapping count of successful 100 Hz samples.
+    pub sample_count: u32,
+    pub average_rate_hz: f32,
 }
 
 /// Latest raw inertial measurement from the board-mounted ICM-42688-P.

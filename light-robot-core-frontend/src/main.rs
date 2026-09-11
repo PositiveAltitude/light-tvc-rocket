@@ -1522,6 +1522,8 @@ fn FlightDashboard() -> Html {
     let state = &*state;
     let imu = &state.imu;
     let battery = &state.battery;
+    let barometer = &state.barometer;
+    let pyro = &state.pyro;
     let format_axis = |values: &[f32; 3]| {
         format!(
             "X {:+.2}   Y {:+.2}   Z {:+.2}",
@@ -1536,6 +1538,21 @@ fn FlightDashboard() -> Html {
             <Card title="Battery" icon="battery_charging_full">
                 <div class={if battery.present { "battery-status" } else { "battery-status offline" }}>{if battery.present { "LIVE — MAX17048 FUEL GAUGE" } else { "OFFLINE — CHECK I²C FUEL GAUGE" }}</div>
                 <div class="battery-readings"><div><span>{"VOLTAGE"}</span><strong>{if battery.present { format!("{:.3} V", battery.voltage) } else { "—".to_owned() }}</strong></div><div><span>{"STATE OF CHARGE"}</span><strong>{if battery.present { format!("{:.0}%", battery.soc) } else { "—".to_owned() }}</strong></div></div>
+            </Card>
+            <Card title="Pyro continuity" icon="electrical_services">
+                <div class="battery-readings">
+                    <div><span>{"CHANNEL 1"}</span><strong>{if pyro.channel1.continuity { "CONTINUITY" } else { "OPEN" }}</strong><small>{format!("{:.3} V test", pyro.channel1.test_voltage)}</small></div>
+                    <div><span>{"CHANNEL 2"}</span><strong>{if pyro.channel2.continuity { "CONTINUITY" } else { "OPEN" }}</strong><small>{format!("{:.3} V test", pyro.channel2.test_voltage)}</small></div>
+                </div>
+            </Card>
+            <Card title="BMP280 barometer" icon="speed">
+                <div class={if barometer.present { "imu-status" } else { "imu-status offline" }}>{if barometer.present { "ONLINE — 100 HZ ACQUISITION" } else { "OFFLINE — CHECK I²C SENSOR" }}</div>
+                <div class="battery-readings">
+                    <div><span>{"ALTITUDE"}</span><strong>{if barometer.present { format!("{:.1} m", barometer.altitude) } else { "—".to_owned() }}</strong></div>
+                    <div><span>{"PRESSURE"}</span><strong>{if barometer.present { format!("{:.2} hPa", barometer.pressure_hpa) } else { "—".to_owned() }}</strong></div>
+                    <div><span>{"TEMPERATURE"}</span><strong>{if barometer.present { format!("{:.1} °C", barometer.temperature) } else { "—".to_owned() }}</strong></div>
+                </div>
+                <small>{format!("{} successful samples · average {:.1} Hz", barometer.sample_count, barometer.average_rate_hz)}</small>
             </Card>
             <Card title="ICM-42688-P inertial measurement" icon="sensors">
                 <div class="imu-status">{if imu.present { "ONLINE — 100 HZ ACQUISITION" } else { "OFFLINE — CHECK I²C SENSOR" }}</div>
@@ -1649,7 +1666,9 @@ fn App() -> Html {
         use_effect_with_deps(
             move |incoming| {
                 if let Some(incoming) = &**incoming {
-                    if let Ok(SocketMessage::State(next)) = serde_json::from_str::<SocketMessage>(incoming) {
+                    if let Ok(SocketMessage::State(next)) =
+                        serde_json::from_str::<SocketMessage>(incoming)
+                    {
                         state.set(next);
                     }
                     message.set(Some(incoming.clone()));
@@ -1663,7 +1682,11 @@ fn App() -> Html {
         let socket = socket.clone();
         Callback::from(move |command| socket.send(serde_json::to_string(&command).unwrap()))
     };
-    let connection = AppConnection { state, message, send_command };
+    let connection = AppConnection {
+        state,
+        message,
+        send_command,
+    };
     let activated = {
         let tab = tab.clone();
         Callback::from(move |id| tab.set(id))
