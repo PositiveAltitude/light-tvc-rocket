@@ -1,5 +1,6 @@
 extern crate core;
 
+mod barometer;
 mod external_flash;
 mod imu;
 mod led_driver;
@@ -8,6 +9,7 @@ mod shared_i2c;
 mod voltage_regulator;
 mod wifi;
 
+use crate::barometer::Barometer;
 use crate::imu::Imu;
 use crate::led_driver::LedDriver;
 use crate::server::Server;
@@ -19,6 +21,10 @@ use bldc_servo_protocol::{
     ServoResponseFrame,
 };
 use enumset::EnumSet;
+use esp_idf_hal::adc::{
+    attenuation,
+    oneshot::{config::AdcChannelConfig, AdcChannelDriver, AdcDriver},
+};
 use esp_idf_hal::can::{CanDriver, Frame};
 use esp_idf_hal::cpu::Core;
 use esp_idf_hal::delay::FreeRtos;
@@ -53,8 +59,14 @@ const ORIENTATION_CHECK_MAX_COMMAND: f32 = 0.75;
 const ORIENTATION_CHECK_PERIOD: Duration = Duration::from_millis(20);
 /// Host polling cadence for the ICM-42688-P output registers.
 const IMU_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
+/// BMP280 and ADC telemetry are acquired at the same 100 Hz cadence as IMU.
+const SENSOR_SAMPLE_PERIOD: Duration = Duration::from_millis(10);
 /// MAX17048 telemetry is intentionally low-rate to minimize shared-I²C load.
 const BATTERY_SAMPLE_PERIOD: Duration = Duration::from_millis(250);
+/// The continuity-test dividers scale their source voltage by 2.
+const ADC_DIVIDER_SCALE: f32 = 2.0;
+/// An intact igniter produces roughly 5 V before the divider (2.5 V ADC).
+const CONTINUITY_THRESHOLD_VOLTS: f32 = 1.0;
 fn normalized_position_to_encoder(configuration: &ServoConfiguration, position: f32) -> u16 {
     let counts_per_degree = ENCODER_COUNTS_PER_TURN as f32 / 360.0;
     let delta = (counts_per_degree
@@ -315,7 +327,8 @@ fn main() -> ! {
         &SpiConfig::new().baudrate(10_u32.MHz().into()),
     )
     .unwrap();
-    let mut external_flash = external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
+    let mut external_flash =
+        external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
     match external_flash
         .reset()
         .and_then(|_| external_flash.read_id())
@@ -324,7 +337,10 @@ fn main() -> ! {
             info!("External NAND ready: JEDEC {:02x?}", id);
             match external_flash.clear_write_protection() {
                 Ok(protection) => {
-                    info!("External NAND write protection cleared: SR-1={:02x}", protection);
+                    info!(
+                        "External NAND write protection cleared: SR-1={:02x}",
+                        protection
+                    );
                 }
                 Err(error) => {
                     info!("External NAND remains write-protected: {:?}", error);
@@ -795,6 +811,113 @@ fn main() -> ! {
     });
     if let Some(default_imu_thread_config) = default_imu_thread_config {
         default_imu_thread_config.set().unwrap();
+    }
+
+    // Sample the barometer and passive continuity telemetry from a separate
+    // one-slot 100 Hz ticker. As with the IMU, overload drops an old tick
+    // instead of creating a burst of delayed samples.
+    let (sensor_tick_sender, sensor_tick_receiver) = mpsc::sync_channel::<()>(1);
+    let sensor_timer_service = EspTaskTimerService::new().unwrap();
+    let sensor_timer = sensor_timer_service
+        .timer(move || {
+            let _ = sensor_tick_sender.try_send(());
+        })
+        .unwrap();
+    sensor_timer.every(SENSOR_SAMPLE_PERIOD).unwrap();
+
+    let sensor_i2c = i2c.clone();
+    let sensor_state = state.clone();
+    let sensor_adc = peripherals.adc1;
+    let pyro1_test_pin = peripherals.pins.gpio4;
+    let pyro2_test_pin = peripherals.pins.gpio6;
+    let default_sensor_thread_config = esp_idf_hal::task::thread::ThreadSpawnConfiguration::get();
+    esp_idf_hal::task::thread::ThreadSpawnConfiguration {
+        name: Some(CStr::from_bytes_with_nul(b"environment-sampler\0").unwrap()),
+        stack_size: 16 * 1024,
+        pin_to_core: Some(Core::Core1),
+        ..Default::default()
+    }
+    .set()
+    .unwrap();
+    thread::spawn(move || {
+        let adc = AdcDriver::new(sensor_adc).expect("ADC1 initialization failed");
+        let adc_config = AdcChannelConfig {
+            attenuation: attenuation::DB_12,
+            ..Default::default()
+        };
+        let mut pyro1_test = AdcChannelDriver::new(&adc, pyro1_test_pin, &adc_config)
+            .expect("PYRO1 continuity ADC initialization failed");
+        let mut pyro2_test = AdcChannelDriver::new(&adc, pyro2_test_pin, &adc_config)
+            .expect("PYRO2 continuity ADC initialization failed");
+        let mut barometer = Barometer::new(sensor_i2c);
+        let mut barometer_initialized = false;
+        let mut sample_count = 0_u32;
+        let mut first_sample_at = None::<Instant>;
+        let mut barometer_failure_reported = false;
+        let mut adc_failure_reported = false;
+        while sensor_tick_receiver.recv().is_ok() {
+            if !barometer_initialized {
+                match barometer.initialize() {
+                    Ok(()) => {
+                        barometer_initialized = true;
+                        sample_count = 0;
+                        first_sample_at = None;
+                    }
+                    Err(error) => {
+                        if !barometer_failure_reported {
+                            info!("BMP280 initialization failed: {:?}", error);
+                            barometer_failure_reported = true;
+                        }
+                    }
+                }
+            }
+            if barometer_initialized {
+                let next_sample_count = sample_count.wrapping_add(1);
+                match barometer.read(next_sample_count) {
+                    Ok(mut reading) => {
+                        barometer_failure_reported = false;
+                        let first = *first_sample_at.get_or_insert_with(Instant::now);
+                        sample_count = next_sample_count;
+                        reading.average_rate_hz = if sample_count > 1 {
+                            (sample_count - 1) as f32 / first.elapsed().as_secs_f32()
+                        } else {
+                            0.0
+                        };
+                        sensor_state.lock().unwrap().barometer = reading;
+                    }
+                    Err(error) => {
+                        if !barometer_failure_reported {
+                            info!("BMP280 read failed: {:?}; retrying initialization", error);
+                            barometer_failure_reported = true;
+                        }
+                        barometer_initialized = false;
+                        sensor_state.lock().unwrap().barometer.present = false;
+                    }
+                }
+            }
+
+            match (pyro1_test.read(), pyro2_test.read()) {
+                (Ok(pyro1_mv), Ok(pyro2_mv)) => {
+                    let pyro1_voltage = pyro1_mv as f32 / 1000.0 * ADC_DIVIDER_SCALE;
+                    let pyro2_voltage = pyro2_mv as f32 / 1000.0 * ADC_DIVIDER_SCALE;
+                    let mut state = sensor_state.lock().unwrap();
+                    state.pyro.channel1.test_voltage = pyro1_voltage;
+                    state.pyro.channel1.continuity = pyro1_voltage >= CONTINUITY_THRESHOLD_VOLTS;
+                    state.pyro.channel2.test_voltage = pyro2_voltage;
+                    state.pyro.channel2.continuity = pyro2_voltage >= CONTINUITY_THRESHOLD_VOLTS;
+                    adc_failure_reported = false;
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    if !adc_failure_reported {
+                        info!("Continuity ADC read failed: {:?}", error);
+                        adc_failure_reported = true;
+                    }
+                }
+            }
+        }
+    });
+    if let Some(default_sensor_thread_config) = default_sensor_thread_config {
+        default_sensor_thread_config.set().unwrap();
     }
 
     // Keep deterministic flight-control work off the core that runs Wi-Fi and
