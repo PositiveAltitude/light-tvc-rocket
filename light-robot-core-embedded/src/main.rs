@@ -52,6 +52,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const WIFI_CONFIGURATION_NVS_KEY: &str = "wifi";
+const PRELAUNCH_CHECKLIST_NVS_KEY: &str = "prelaunch";
+const PYRO_CONFIGURATION_NVS_KEY: &str = "pyro_cfg";
 const ENCODER_COUNTS_PER_TURN: i32 = 16_384;
 const SERVO_TEST_CAPTURE_MS: u64 = 250;
 const INERTIA_CAPTURE_DURATION: Duration = Duration::from_secs(5);
@@ -288,6 +290,52 @@ fn main() -> ! {
             }
         }
     }
+    let saved_checklist_length = {
+        servo_nvs
+            .lock()
+            .unwrap()
+            .blob_len(PRELAUNCH_CHECKLIST_NVS_KEY)
+            .ok()
+            .flatten()
+    };
+    if let Some(length) = saved_checklist_length {
+        let mut bytes = vec![0; length];
+        let saved = servo_nvs
+            .lock()
+            .unwrap()
+            .get_blob(PRELAUNCH_CHECKLIST_NVS_KEY, &mut bytes)
+            .ok()
+            .flatten()
+            .map(Vec::from);
+        if let Some(bytes) = saved {
+            if let Ok(checklist) = serde_json::from_slice(&bytes) {
+                state.lock().unwrap().prelaunch_checklist = checklist;
+            }
+        }
+    }
+    let saved_pyro_length = {
+        servo_nvs
+            .lock()
+            .unwrap()
+            .blob_len(PYRO_CONFIGURATION_NVS_KEY)
+            .ok()
+            .flatten()
+    };
+    if let Some(length) = saved_pyro_length {
+        let mut bytes = vec![0; length];
+        let saved = servo_nvs
+            .lock()
+            .unwrap()
+            .get_blob(PYRO_CONFIGURATION_NVS_KEY, &mut bytes)
+            .ok()
+            .flatten()
+            .map(Vec::from);
+        if let Some(bytes) = saved {
+            if let Ok(configuration) = serde_json::from_slice(&bytes) {
+                state.lock().unwrap().pyro_configuration = configuration;
+            }
+        }
+    }
     let wifi_credentials = { load_wifi_credentials(&servo_nvs.lock().unwrap()) };
     if let Some(credentials) = &wifi_credentials {
         state.lock().unwrap().configured_wifi_ssid = credentials.ssid.clone();
@@ -490,6 +538,8 @@ fn main() -> ! {
     let servo_save_sender_ = servo_save_sender.clone();
     let hil_action = calibration_action.clone();
     let wifi_nvs = servo_nvs.clone();
+    let checklist_nvs = servo_nvs.clone();
+    let pyro_configuration_state = state.clone();
     let wifi_state = state.clone();
     let command_handler = move |c: &api::Command| -> anyhow::Result<()> {
         match c {
@@ -535,6 +585,9 @@ fn main() -> ! {
                 configuration,
             } => {
                 let mut calibration = calibration_state.lock().unwrap();
+                let locked_step = if *axis == ServoAxis::Y { 0 } else { 1 };
+                anyhow::ensure!(calibration.prelaunch_checklist.completed_steps <= locked_step,
+                    "this servo configuration is signed off; return to its checklist step before changing it");
                 if *axis == ServoAxis::X {
                     calibration.servo_calibration.x = configuration.clone();
                 } else {
@@ -544,6 +597,9 @@ fn main() -> ! {
                     CalibrationAction::Apply(*axis, configuration.clone());
             }
             Command::CaptureServoZero { axis } => {
+                let locked_step = if *axis == ServoAxis::Y { 0 } else { 1 };
+                anyhow::ensure!(calibration_state.lock().unwrap().prelaunch_checklist.completed_steps <= locked_step,
+                    "this servo configuration is signed off; return to its checklist step before changing it");
                 *calibration_action_.lock().unwrap() = CalibrationAction::CaptureZero(*axis)
             }
             Command::SetServoEnabled { axis, enabled } => {
@@ -564,6 +620,9 @@ fn main() -> ! {
                 configuration,
             } => {
                 let mut calibration = calibration_state.lock().unwrap();
+                let locked_step = if *axis == ServoAxis::Y { 0 } else { 1 };
+                anyhow::ensure!(calibration.prelaunch_checklist.completed_steps <= locked_step,
+                    "this servo configuration is signed off; return to its checklist step before changing it");
                 if *axis == ServoAxis::X {
                     calibration.servo_calibration.x = configuration.clone();
                 } else {
@@ -572,6 +631,9 @@ fn main() -> ! {
                 *calibration_action_.lock().unwrap() = CalibrationAction::StartTest(*axis)
             }
             Command::AssignServoDevice { axis, device } => {
+                let locked_step = if *axis == ServoAxis::Y { 0 } else { 1 };
+                anyhow::ensure!(calibration_state.lock().unwrap().prelaunch_checklist.completed_steps <= locked_step,
+                    "this servo configuration is signed off; return to its checklist step before changing it");
                 *calibration_action_.lock().unwrap() =
                     CalibrationAction::AssignDevice(*axis, device.clone())
             }
@@ -612,9 +674,13 @@ fn main() -> ! {
                 }
             }
             Command::SetInertiaConfiguration { configuration } => {
+                anyhow::ensure!(inertia_capture_state.lock().unwrap().prelaunch_checklist.completed_steps <= 6,
+                    "moment of inertia is signed off; return to that checklist step before changing it");
                 inertia_capture_state.lock().unwrap().inertia_configuration = configuration.clone();
             }
             Command::SaveInertiaConfiguration { configuration } => {
+                anyhow::ensure!(inertia_capture_state.lock().unwrap().prelaunch_checklist.completed_steps <= 6,
+                    "moment of inertia is signed off; return to that checklist step before changing it");
                 inertia_capture_state.lock().unwrap().inertia_configuration = configuration.clone();
                 match serde_json::to_vec(configuration) {
                     Ok(bytes) => match inertia_nvs.lock().unwrap().set_blob("inertia", &bytes) {
@@ -631,12 +697,16 @@ fn main() -> ! {
                 }
             }
             Command::SetSimulationConfiguration { configuration } => {
+                anyhow::ensure!(inertia_capture_state.lock().unwrap().prelaunch_checklist.completed_steps <= 7,
+                    "simulation parameters are signed off; return to that checklist step before changing them");
                 inertia_capture_state
                     .lock()
                     .unwrap()
                     .simulation_configuration = configuration.clone();
             }
             Command::SaveSimulationConfiguration { configuration } => {
+                anyhow::ensure!(inertia_capture_state.lock().unwrap().prelaunch_checklist.completed_steps <= 7,
+                    "simulation parameters are signed off; return to that checklist step before changing them");
                 inertia_capture_state
                     .lock()
                     .unwrap()
@@ -660,6 +730,139 @@ fn main() -> ! {
                 );
                 drop(s);
                 *hil_action.lock().unwrap() = CalibrationAction::StartHil(configuration.clone());
+            }
+
+            Command::SetPyroConfiguration { configuration } => {
+                let mut s = pyro_configuration_state.lock().unwrap();
+                if configuration.parachute_duration_ms != s.pyro_configuration.parachute_duration_ms {
+                    anyhow::ensure!(s.prelaunch_checklist.completed_steps <= 4,
+                        "parachute timing is signed off; return to its checklist step before changing it");
+                }
+                if configuration.igniter_duration_ms != s.pyro_configuration.igniter_duration_ms {
+                    anyhow::ensure!(s.prelaunch_checklist.completed_steps <= 5,
+                        "igniter timing is signed off; return to its checklist step before changing it");
+                }
+                s.pyro_configuration = configuration.clone();
+                let bytes = serde_json::to_vec(configuration)?;
+                checklist_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(PYRO_CONFIGURATION_NVS_KEY, &bytes)?;
+            }
+            Command::TestPyro { channel } => {
+                let channel = *channel;
+                info!("PYR{} test requested", channel);
+                let (duration_ms, pin, firing_state) = {
+                    let s = pyro_configuration_state.lock().unwrap();
+                    anyhow::ensure!(channel == 1 || channel == 2, "unknown pyro channel");
+                    if channel == 2 {
+                        anyhow::ensure!(
+                            s.prelaunch_checklist.active
+                                && s.prelaunch_checklist.completed_steps == 5,
+                            "PYR2 test is allowed only on its active checklist step"
+                        );
+                    }
+                    (
+                        if channel == 1 {
+                            s.pyro_configuration.parachute_duration_ms
+                        } else {
+                            s.pyro_configuration.igniter_duration_ms
+                        },
+                        if channel == 1 {
+                            pyro1_.clone()
+                        } else {
+                            pyro2_.clone()
+                        },
+                        pyro_configuration_state.clone(),
+                    )
+                };
+                thread::spawn(move || {
+                    if let Ok(mut pin) = pin.lock() {
+                        if pin.set_high().is_err() {
+                            info!("PYR{} test could not drive GPIO high", channel);
+                            return;
+                        }
+                        info!("PYR{} GPIO high for {} ms", channel, duration_ms);
+                        {
+                            let mut state = firing_state.lock().unwrap();
+                            if channel == 1 {
+                                state.pyro.channel1.fire = true;
+                            } else {
+                                state.pyro.channel2.fire = true;
+                            }
+                        }
+                        FreeRtos::delay_ms(duration_ms as u32);
+                        if pin.set_low().is_err() {
+                            info!("PYR{} test could not drive GPIO low", channel);
+                        }
+                        info!("PYR{} GPIO low", channel);
+                        let mut state = firing_state.lock().unwrap();
+                        if channel == 1 {
+                            state.pyro.channel1.fire = false;
+                        } else {
+                            state.pyro.channel2.fire = false;
+                        }
+                    } else { info!("PYR{} test could not lock GPIO", channel); }
+                });
+            }
+            Command::StartPrelaunchChecklist => {
+                let mut s = pyro_configuration_state.lock().unwrap();
+                s.prelaunch_checklist = PrelaunchChecklistState {
+                    active: true,
+                    completed_steps: 0,
+                };
+                let bytes = serde_json::to_vec(&s.prelaunch_checklist)?;
+                checklist_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(PRELAUNCH_CHECKLIST_NVS_KEY, &bytes)?;
+            }
+            Command::AbortPrelaunchChecklist => {
+                let mut s = pyro_configuration_state.lock().unwrap();
+                s.prelaunch_checklist = PrelaunchChecklistState::default();
+                let bytes = serde_json::to_vec(&s.prelaunch_checklist)?;
+                checklist_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(PRELAUNCH_CHECKLIST_NVS_KEY, &bytes)?;
+            }
+            Command::SignOffPrelaunchStep { step } => {
+                let mut s = pyro_configuration_state.lock().unwrap();
+                anyhow::ensure!(
+                    s.prelaunch_checklist.active,
+                    "start the pre-launch checklist first"
+                );
+                anyhow::ensure!(
+                    s.prelaunch_checklist.completed_steps == step.index(),
+                    "steps must be signed off in order"
+                );
+                if *step == PrelaunchChecklistStep::CheckParachuteConnection {
+                    anyhow::ensure!(s.pyro.channel1.continuity && !s.pyro.channel2.continuity,
+                        "PYR1 must show continuity and PYR2 must be open before signing off parachute-only connection");
+                }
+                s.prelaunch_checklist.completed_steps += 1;
+                let bytes = serde_json::to_vec(&s.prelaunch_checklist)?;
+                checklist_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(PRELAUNCH_CHECKLIST_NVS_KEY, &bytes)?;
+            }
+            Command::ReturnToPrelaunchStep { step } => {
+                let mut s = pyro_configuration_state.lock().unwrap();
+                anyhow::ensure!(
+                    s.prelaunch_checklist.active,
+                    "start the pre-launch checklist first"
+                );
+                anyhow::ensure!(
+                    step.index() < s.prelaunch_checklist.completed_steps,
+                    "that step has not been signed off"
+                );
+                s.prelaunch_checklist.completed_steps = step.index();
+                let bytes = serde_json::to_vec(&s.prelaunch_checklist)?;
+                checklist_nvs
+                    .lock()
+                    .unwrap()
+                    .set_blob(PRELAUNCH_CHECKLIST_NVS_KEY, &bytes)?;
             }
 
             Command::TestServo { .. } => {}
