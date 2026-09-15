@@ -3,7 +3,7 @@ use esp_idf_hal::modem::WifiModemPeripheral;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::wifi::*;
 use light_robot_core_api::*;
-use log::info;
+use log::{info, warn};
 use std::sync::{Arc, Mutex};
 
 /// One initial connection plus two retries before recovery AP mode.
@@ -12,7 +12,6 @@ const CLIENT_RETRY_DELAY_MS: u32 = 1_000;
 
 pub struct WiFi<'a> {
     _wifi: BlockingWifi<EspWifi<'a>>,
-    _state: Arc<Mutex<State>>,
 }
 
 impl<'a> WiFi<'a> {
@@ -48,6 +47,7 @@ impl<'a> WiFi<'a> {
             }),
         };
 
+        let mut last_error = None;
         for attempt in 1..=CLIENT_CONNECT_ATTEMPTS {
             let connection_result: Result<()> = (|| {
                 wifi.set_configuration(&client_config)?;
@@ -59,28 +59,15 @@ impl<'a> WiFi<'a> {
 
             match connection_result {
                 Ok(()) => {
-                    info!(
-                        "WIFI Connect -- OK on attempt {}/{}",
-                        attempt,
-                        CLIENT_CONNECT_ATTEMPTS
-                    );
                     let mut configuration = configuration.clone();
                     configuration.credentials.password = "".into();
                     state.lock().unwrap().wifi_state = configuration;
                     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-                    info!("DHCP info: {:?}", ip_info);
-                    return Ok(Self {
-                        _wifi: wifi,
-                        _state: state,
-                    });
+                    info!("Wi-Fi client connected: {:?}", ip_info);
+                    return Ok(Self { _wifi: wifi });
                 }
                 Err(error) => {
-                    info!(
-                        "WIFI Connect attempt {}/{} -- FAIL: {:?}",
-                        attempt,
-                        CLIENT_CONNECT_ATTEMPTS,
-                        error
-                    );
+                    last_error = Some(error);
                     // Start every retry from a known driver state; a failed
                     // authentication attempt can otherwise leave the station
                     // still connecting when the next connect is requested.
@@ -92,7 +79,10 @@ impl<'a> WiFi<'a> {
             }
         }
 
-        info!("WIFI Connect -- all attempts failed; starting access point");
+        warn!(
+            "Wi-Fi client unavailable after {} attempts: {:?}; starting recovery AP",
+            CLIENT_CONNECT_ATTEMPTS, last_error
+        );
         Self::start_access_point(wifi, state)
     }
 
@@ -107,7 +97,6 @@ impl<'a> WiFi<'a> {
         }))?;
         wifi.start()?;
         wifi.wait_netif_up()?;
-        info!("WIFI AP Start -- OK");
         state.lock().unwrap().wifi_state = WifiConnectionConfiguration {
             connection_type: WifiConnectionType::StartAccessPoint,
             credentials: WifiCredentials {
@@ -116,11 +105,7 @@ impl<'a> WiFi<'a> {
             },
         };
         let ip_info = wifi.wifi().ap_netif().get_ip_info()?;
-        info!("DHCP -- OK");
-        info!("DHCP info: {:?}", ip_info);
-        Ok(Self {
-            _wifi: wifi,
-            _state: state,
-        })
+        info!("Wi-Fi recovery AP active: {:?}", ip_info);
+        Ok(Self { _wifi: wifi })
     }
 }

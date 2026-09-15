@@ -16,34 +16,29 @@ pub struct State {
     /// inertia and the gimbal-to-COM distance deliberately live in
     /// `inertia_configuration`, since they are measured during onboarding.
     pub simulation_configuration: SimulationConfiguration,
-    #[serde(default)] pub hil_simulation: HilSimulationState,
+    #[serde(default)]
+    pub hil_simulation: HilSimulationState,
     pub servo1: ServoState,
     pub servo2: ServoState,
-    pub weight: i32,
-    pub chip_id1: [u8; 6],
-    pub chip_id2: [u8; 6],
     pub servo_calibration: ServoCalibrationState,
-    #[serde(default)] pub pyro_configuration: PyroConfiguration,
-    #[serde(default)] pub prelaunch_checklist: PrelaunchChecklistState,
+    #[serde(default)]
+    pub pyro_configuration: PyroConfiguration,
+    #[serde(default)]
+    pub prelaunch_checklist: PrelaunchChecklistState,
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub enum ServoAxis {
+    #[default]
     X,
     Y,
 }
 
 /// The two 48-bit identity halves reported by a servo during CAN discovery.
-#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ServoDeviceId {
     pub chip_id1: [u8; 6],
     pub chip_id2: [u8; 6],
-}
-
-impl Default for ServoAxis {
-    fn default() -> Self {
-        Self::X
-    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +112,7 @@ pub struct ServoTestResult {
 }
 
 /// Messages carried by the persistent UI WebSocket.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum SocketMessage {
     State(State),
@@ -128,9 +124,6 @@ pub enum SocketMessage {
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ServoState {
     pub position: u16,
-    pub velocity: i16,
-    pub current: i16,
-    pub sensor_detected: bool,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -138,7 +131,6 @@ pub struct BatteryState {
     pub present: bool,
     pub soc: f32,
     pub voltage: f32,
-    pub charge_rate: f32,
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, Debug)]
@@ -153,16 +145,11 @@ pub struct WifiConnectionConfiguration {
     pub credentials: WifiCredentials,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize, Debug)]
 pub enum WifiConnectionType {
     ConnectToExternal,
+    #[default]
     StartAccessPoint,
-}
-
-impl Default for WifiConnectionType {
-    fn default() -> Self {
-        WifiConnectionType::StartAccessPoint
-    }
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -307,16 +294,13 @@ pub struct InertiaConfiguration {
 /// Units are SI except where a field explicitly says degrees or milliseconds.
 /// This is a data-only type: the simulation crate turns it, together with the
 /// measured `InertiaConfiguration`, into a physical model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MotorThrustProfile {
     /// A rectangular pulse using the configured thrust and burn duration.
+    #[default]
     Constant,
     /// Raketenmodellbau Klima D3 manufacturer RASP data.
     KlimaD3,
-}
-
-impl Default for MotorThrustProfile {
-    fn default() -> Self { Self::Constant }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -340,10 +324,35 @@ pub struct SimulationConfiguration {
     pub initial_tilt_degrees: [f32; 2],
     pub pid_gains: [f32; 3],
 }
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationState { pub running: bool, pub result_revision: u32, pub missed_deadlines: u32 }
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationSample { pub time_us: u32, pub scheduled_time_us: u32, pub position_m: [f32; 3], pub orientation_xy_degrees: [f32; 2], pub tvc_command: [f32; 2], pub tvc_actual: [f32; 2] }
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationResult { pub samples: Vec<HilSimulationSample>, pub missed_deadlines: u32 }
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)] pub struct HilSimulationChunk { pub revision: u32, pub index: u16, pub total: u16, pub missed_deadlines: u32, pub samples: Vec<HilSimulationSample> }
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct HilSimulationState {
+    pub running: bool,
+    pub result_revision: u32,
+    pub missed_deadlines: u32,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct HilSimulationSample {
+    pub time_us: u32,
+    pub scheduled_time_us: u32,
+    pub position_m: [f32; 3],
+    pub orientation_xy_degrees: [f32; 2],
+    pub tvc_command: [f32; 2],
+    pub tvc_actual: [f32; 2],
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct HilSimulationResult {
+    pub samples: Vec<HilSimulationSample>,
+    pub missed_deadlines: u32,
+}
+
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct HilSimulationChunk {
+    pub index: u16,
+    pub missed_deadlines: u32,
+    pub samples: Vec<HilSimulationSample>,
+}
 
 impl Default for SimulationConfiguration {
     fn default() -> Self {
@@ -383,17 +392,6 @@ pub enum Command {
         ssid: String,
         password: String,
     },
-    SetLedColor {
-        r: u8,
-        g: u8,
-        b: u8,
-    },
-    TestServo {
-        servo_id: u8,
-        start: f32,
-        end: f32,
-    },
-    DetectServos,
     SetServoConfiguration {
         axis: ServoAxis,
         configuration: ServoConfiguration,
@@ -428,13 +426,12 @@ pub enum Command {
     SaveInertiaConfiguration {
         configuration: InertiaConfiguration,
     },
-    SetSimulationConfiguration {
-        configuration: SimulationConfiguration,
-    },
     SaveSimulationConfiguration {
         configuration: SimulationConfiguration,
     },
-    StartHilSimulation { configuration: SimulationConfiguration },
+    StartHilSimulation {
+        configuration: SimulationConfiguration,
+    },
     SetPyroConfiguration {
         configuration: PyroConfiguration,
     },
@@ -451,9 +448,4 @@ pub enum Command {
     ReturnToPrelaunchStep {
         step: PrelaunchChecklistStep,
     },
-}
-
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct TestData {
-    pub data: Vec<(u16, u16)>,
 }

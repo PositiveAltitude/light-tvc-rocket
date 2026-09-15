@@ -267,7 +267,7 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 [[package]]
 name = "bldc-servo-protocol"
 version = "0.1.0"
-source = "git+https://github.com/PositiveAltitude/BLDC-servo-v1.git?rev=8c5e7bbc673a042bdb1d58115d9f2eda6bc9da41#8c5e7bbc673a042bdb1d58115d9f2eda6bc9da41"
+source = "git+https://github.com/PositiveAltitude/BLDC-servo-v1.git?rev=c4f5635c28fd84dce6b1f60653fa28dc6a70640e#c4f5635c28fd84dce6b1f60653fa28dc6a70640e"
 dependencies = [
  "bincode",
 ]

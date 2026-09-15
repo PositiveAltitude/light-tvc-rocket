@@ -18,7 +18,6 @@ const CONFIG_100_HZ: u8 = 0x07;
 const ACCEL_SCALE_MPS2: f32 = 16.0 * 9.80665 / 32768.0;
 const GYRO_SCALE_RADPS: f32 = 2000.0 * core::f32::consts::PI / 180.0 / 32768.0;
 
-#[derive(Debug)]
 pub enum ImuError {
     IdentityRead,
     UnexpectedIdentity(u8),
@@ -26,6 +25,22 @@ pub enum ImuError {
     GyroConfiguration,
     AccelConfiguration,
     DataRead,
+}
+
+impl core::fmt::Debug for ImuError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::IdentityRead => formatter.write_str("IdentityRead"),
+            Self::UnexpectedIdentity(identity) => formatter
+                .debug_tuple("UnexpectedIdentity")
+                .field(identity)
+                .finish(),
+            Self::PowerMode => formatter.write_str("PowerMode"),
+            Self::GyroConfiguration => formatter.write_str("GyroConfiguration"),
+            Self::AccelConfiguration => formatter.write_str("AccelConfiguration"),
+            Self::DataRead => formatter.write_str("DataRead"),
+        }
+    }
 }
 
 /// ICM-42688-P raw accel/gyro reader at the board's AP_AD0-high I²C address.

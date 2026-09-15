@@ -4,9 +4,13 @@
 //! writes one 2 KiB page and erasure is one 128 KiB block (64 pages).  Callers
 //! must therefore use an append-only layout and must never overwrite a page.
 
+// The complete storage API is intentionally retained before its first flight
+// logging consumer is added.
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+
 use embedded_hal::spi::{Operation, SpiDevice};
 use esp_idf_hal::delay::FreeRtos;
-use log::info;
 
 pub const PAGE_SIZE: usize = 2_048;
 pub const SPARE_SIZE: usize = 64;
@@ -539,16 +543,6 @@ where
         }
         self.records = Some(records);
         self.occupied_blocks = Some(occupied_blocks);
-        info!(
-            "External NAND metadata index ready: {} committed segments across {} occupied blocks",
-            self.records.as_ref().expect("index initialized").len(),
-            self.occupied_blocks
-                .as_ref()
-                .expect("index initialized")
-                .iter()
-                .filter(|occupied| **occupied)
-                .count()
-        );
         Ok(())
     }
 }
