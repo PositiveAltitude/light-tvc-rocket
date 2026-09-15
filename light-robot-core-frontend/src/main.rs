@@ -79,6 +79,113 @@ fn device_name(device: &ServoDeviceId) -> String {
     format!("{} / {}", id1, id2)
 }
 
+const PRELAUNCH_STEPS: [(PrelaunchChecklistStep, &str); 8] = [
+    (PrelaunchChecklistStep::ConfigureYServo, "Configure Y servo"),
+    (PrelaunchChecklistStep::ConfigureXServo, "Configure X servo"),
+    (PrelaunchChecklistStep::CheckTvcDirections, "Check TVC axis directions"),
+    (PrelaunchChecklistStep::CheckParachuteConnection, "Check parachute on PYR1 only"),
+    (PrelaunchChecklistStep::ConfigureAndTestParachute, "Configure and test parachute activation"),
+    (PrelaunchChecklistStep::ConfigureAndCheckIgniter, "Configure igniter timing and conductivity"),
+    (PrelaunchChecklistStep::MeasureMomentsOfInertia, "Measure moments of inertia"),
+    (PrelaunchChecklistStep::RunSimulationAndSavePid, "Run simulation/HIL and save PID"),
+];
+
+#[function_component]
+fn PrelaunchChecklist() -> Html {
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let checklist = connection.state.prelaunch_checklist.clone();
+    let socket = connection.send_command.clone();
+    let start = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::StartPrelaunchChecklist)) };
+    let abort = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::AbortPrelaunchChecklist)) };
+    html! { <Card title="pre-launch checklist" icon="fact_check">
+        if !checklist.active {
+            <p>{"Saved sign-offs lock completed settings."}</p>
+            <button onclick={start}>{"Start"}</button>
+        } else {
+            <p>{format!("{} of {} signed off", checklist.completed_steps, PrelaunchChecklistStep::COUNT)}</p>
+            <ol class="checklist">
+            {for PRELAUNCH_STEPS.iter().map(|(step, label)| {
+                let index = step.index();
+                let signed = index < checklist.completed_steps;
+                let current = index == checklist.completed_steps;
+                let socket = socket.clone();
+                let return_step = *step;
+                let return_to = Callback::from(move |_| send_command(&socket, Command::ReturnToPrelaunchStep { step: return_step }));
+                html! { <li class={if signed {"signed-off"} else if current {"current-step"} else {"pending-step"}}>
+                    <span>{*label}</span>
+                    if signed { <><strong>{"Done"}</strong><button class="danger" onclick={return_to}>{"Redo from here"}</button></> }
+                    else if current { <small>{"Current"}</small> }
+                    else { <small>{"Waiting"}</small> }
+                </li> }
+            })}
+            </ol>
+            <p class="safety-note">{"Redo clears this step and later steps."}</p>
+            <button class="danger" onclick={abort}>{"Abort"}</button>
+        }
+    </Card> }
+}
+
+fn guided_step_copy(step: u8) -> (&'static str, &'static str, PrelaunchChecklistStep) {
+    match step {
+        0 => ("Configure Y servo", "Set up the Y axis.", PrelaunchChecklistStep::ConfigureYServo),
+        1 => ("Configure X servo", "Set up the X axis.", PrelaunchChecklistStep::ConfigureXServo),
+        2 => ("Check TVC directions", "Verify both axes move correctly.", PrelaunchChecklistStep::CheckTvcDirections),
+        3 => ("Check parachute connection", "PYR1: continuity. PYR2: open.", PrelaunchChecklistStep::CheckParachuteConnection),
+        4 => ("Test parachute", "Set duration; test PYR1.", PrelaunchChecklistStep::ConfigureAndTestParachute),
+        5 => ("Configure igniter", "Set duration; test PYR2 with wire only.", PrelaunchChecklistStep::ConfigureAndCheckIgniter),
+        6 => ("Measure inertia", "Capture and save inertia.", PrelaunchChecklistStep::MeasureMomentsOfInertia),
+        _ => ("Simulation and PID", "Run simulation or HIL; save PID.", PrelaunchChecklistStep::RunSimulationAndSavePid),
+    }
+}
+
+#[function_component]
+fn GuidedOnboarding() -> Html {
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let completed = connection.state.prelaunch_checklist.completed_steps;
+    if completed >= PrelaunchChecklistStep::COUNT {
+        return html! { <Card title="checklist complete" icon="task_alt"><p>{"8 / 8 signed off and saved."}</p></Card> };
+    }
+    let (title, instruction, step) = guided_step_copy(completed);
+    let socket = connection.send_command.clone();
+    let sign = Callback::from(move |_| send_command(&socket, Command::SignOffPrelaunchStep { step }));
+    html! { <>
+        <Card title={format!("Step {} of {} — {}", completed + 1, PrelaunchChecklistStep::COUNT, title)} icon="directions_run">
+            <p>{instruction}</p>
+        </Card>
+        if completed == 0 || completed == 1 { <ServoCalibration/> }
+        else if completed == 2 { <ServoOrientationCheck/> }
+        else if completed == 3 || completed == 4 || completed == 5 { <PyroConfigurationPage/> }
+        else if completed == 6 { <MomentOfInertia/> }
+        else { <RocketSimulation/> }
+        <Card title="sign-off" icon="task_alt"><button class="save-button" onclick={sign}>{"Done — next step"}</button></Card>
+    </> }
+}
+
+#[function_component]
+fn PyroConfigurationPage() -> Html {
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let state = connection.state.clone();
+    let socket = connection.send_command.clone();
+    let configuration = use_state_eq(|| state.pyro_configuration.clone());
+    let parachute_locked = state.prelaunch_checklist.completed_steps > 4;
+    let igniter_locked = state.prelaunch_checklist.completed_steps > 5;
+    let pyro2_test_allowed = state.prelaunch_checklist.active && state.prelaunch_checklist.completed_steps == 5;
+    let update = |channel: u8| { let configuration = configuration.clone(); Callback::from(move |value: f32| {
+        let mut next = (*configuration).clone();
+        if channel == 1 { next.parachute_duration_ms = value.round().clamp(1.0, 10_000.0) as u16; } else { next.igniter_duration_ms = value.round().clamp(1.0, 10_000.0) as u16; }
+        configuration.set(next);
+    })};
+    let save = { let socket = socket.clone(); let configuration = configuration.clone(); Callback::from(move |_| send_command(&socket, Command::SetPyroConfiguration { configuration: (*configuration).clone() })) };
+    let test1 = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 1 })) };
+    let test2 = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 2 })) };
+    html! { <div class="calibration-page"><Card title="pyro checkout" icon="electrical_services">
+        <p class="safety-note">{"PYR1: parachute test load only. PYR2: wire short only; never an igniter."}</p>
+        <div class="status">{format!("PYR1: {}{} · PYR2: {}{}", if state.pyro.channel1.continuity {"CONTINUITY"} else {"OPEN"}, if state.pyro.channel1.fire {" · FIRING"} else {""}, if state.pyro.channel2.continuity {"CONTINUITY"} else {"OPEN"}, if state.pyro.channel2.fire {" · FIRING"} else {""})}</div>
+        <div class="config-grid"><label>{"PYR1 parachute duration (ms)"}<NumericInput value={configuration.parachute_duration_ms.to_string()} on_commit={update(1)} disabled={parachute_locked}/></label><label>{"PYR2 igniter duration (ms)"}<NumericInput value={configuration.igniter_duration_ms.to_string()} on_commit={update(2)} disabled={igniter_locked}/></label></div>
+        <div class="button-row"><button class="save-button" onclick={save} disabled={parachute_locked && igniter_locked}>{"Apply durations"}</button><button class="danger" onclick={test1} disabled={state.pyro.channel1.fire}>{if state.pyro.channel1.fire {"PYR1 firing…"} else {"Test PYR1"}}</button><button class="danger" onclick={test2} disabled={!pyro2_test_allowed || state.pyro.channel2.fire}>{if state.pyro.channel2.fire {"PYR2 firing…"} else {"Test PYR2 wire only"}}</button></div>
+    </Card></div> }
+}
+
 #[function_component]
 fn ServoCalibration() -> Html {
     let connection = use_context::<AppConnection>().expect("app connection context");
@@ -366,7 +473,7 @@ fn ServoCalibration() -> Html {
         state.servo_calibration.y_device.as_ref()
     };
     let device_picker = if state.servo_calibration.discovered_devices.is_empty() {
-        html! { <p>{"No servos were detected at startup. Check CAN power, wiring, and termination, then reboot."}</p> }
+        html! { <p>{"No servos. Check CAN power, wiring, termination; reboot."}</p> }
     } else {
         html! {
             <div class="device-picker">
@@ -382,12 +489,12 @@ fn ServoCalibration() -> Html {
         }
     };
     html! { <div class="calibration-page">
-      <Card title="servo calibration" icon="tune"><p class="safety-note">{"Bench use only: restrain the vehicle and keep clear of the TVC mechanism before enabling a motor."}</p><div class="axis-row"><span>{"Servo:"}</span><button class={if *axis == ServoAxis::X {"selected"} else {""}} onclick={select_axis(ServoAxis::X)}>{"X axis"}</button><button class={if *axis == ServoAxis::Y {"selected"} else {""}} onclick={select_axis(ServoAxis::Y)}>{"Y axis"}</button></div>{device_picker}<div class="status">{format!("{}: {}; encoder {}", axis_name(*axis), if detected {"detected"} else {"not detected"}, position)}<br/>{match assigned_device { Some(device) => format!("Assigned: {}", device_name(device)), None => "No device assigned to this axis".into() }}</div></Card>
+      <Card title="servo calibration" icon="tune"><p class="safety-note">{"Bench only. Restrain rocket; keep clear of TVC."}</p><div class="axis-row"><span>{"Servo:"}</span><button class={if *axis == ServoAxis::X {"selected"} else {""}} onclick={select_axis(ServoAxis::X)}>{"X axis"}</button><button class={if *axis == ServoAxis::Y {"selected"} else {""}} onclick={select_axis(ServoAxis::Y)}>{"Y axis"}</button></div>{device_picker}<div class="status">{format!("{}: {}; encoder {}", axis_name(*axis), if detected {"detected"} else {"not detected"}, position)}<br/>{match assigned_device { Some(device) => format!("Assigned: {}", device_name(device)), None => "No device assigned to this axis".into() }}</div></Card>
       <Card title="configuration" icon="settings"><div class="config-grid">
         <label>{"Encoder zero (0–16383)"}<NumericInput value={draft.zero.clone()} on_commit={update("zero")}/></label><label>{"Max turn (° at ±1.0)"}<NumericInput value={draft.turn.clone()} on_commit={update("turn")}/></label><label>{"Position P"}<NumericInput value={draft.p.clone()} on_commit={update("p")}/></label><label>{"Position I"}<NumericInput value={draft.i.clone()} on_commit={update("i")}/></label><label>{"Position D"}<NumericInput value={draft.d.clone()} on_commit={update("d")}/></label><label>{"Duty limit (0–1)"}<NumericInput value={draft.limit.clone()} on_commit={update("limit")}/></label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_motor} onchange={toggle_reverse}/>{"Reverse motor direction (servo firmware)"}</label><label class="checkbox-label"><input type="checkbox" checked={config.reverse_control} onchange={toggle_control_reverse}/>{"Reverse TVC command direction (flight controller: −1 ↔ +1)"}</label>
-      </div><div class="button-row"><button onclick={apply}>{"Apply configuration"}</button><button onclick={capture_zero}>{"Capture current position as zero"}</button></div></Card>
+      </div><div class="button-row"><button onclick={apply}>{"Apply"}</button><button onclick={capture_zero}>{"Set current as zero"}</button></div></Card>
       <Card title="manual test" icon="gamepad"><button class={if *enabled {"danger"} else {""}} onclick={toggle}>{if *enabled {"Motor ON — holding position"} else {"Motor OFF — freewheeling"}}</button><label class="slider-label">{format!("Command: {:.2}", *manual_position)}<input type="range" min="-1" max="1" step="0.01" value={manual_position.to_string()} disabled={!*enabled} oninput={manual} onchange={send_manual}/></label></Card>
-      <Card title="automatic step-response test" icon="show_chart"><p>{"Moves to zero, settles for 2 s, then steps to +0.75. The flight computer records at 1000 Hz for 250 ms."}</p><button disabled={*testing} onclick={start_test}>{if *testing {"Capturing…"} else {"Run performance test"}}</button><TestPlot tests={(*tests).clone()}/><TestTable tests={tests.clone()} config={config.clone()}/></Card><button class="save-button" onclick={save}>{"Save current configurations to flash"}</button>
+      <Card title="step response" icon="show_chart"><p>{"0 → +0.75 · 2 s settle · 250 ms capture"}</p><button disabled={*testing} onclick={start_test}>{if *testing {"Capturing…"} else {"Run test"}}</button><TestPlot tests={(*tests).clone()}/><TestTable tests={tests.clone()} config={config.clone()}/></Card><button class="save-button" onclick={save}>{"Save to flash"}</button>
     </div> }
 }
 
@@ -909,8 +1016,8 @@ fn MomentOfInertia() -> Html {
     html! {
         <div class="inertia-page">
             <Card title="moment of inertia measurement" icon="rotate_right">
-                <p class="safety-note">{"Bench use only: secure the rocket in the pendulum fixture, keep clear of its swing path, and do not arm pyro or TVC outputs."}</p>
-                <p>{"Start a five-second gyro capture after releasing the pendulum."}</p>
+                <p class="safety-note">{"Bench only. Secure pendulum; pyro and TVC off."}</p>
+                <p>{"Release, then capture 5 s."}</p>
                 <div class="config-grid"><label>{"Rocket mass (g)"}<NumericInput value={configuration.mass_g.to_string()} on_commit={update_mass}/></label><label>{"Center of mass position (mm)"}<NumericInput value={configuration.center_of_mass_offset_mm.to_string()} on_commit={update_offset}/></label><label>{"X moment (kg·m²)"}<NumericInput value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[0])} on_commit={update_inertia(0)}/></label><label>{"Y moment (kg·m²)"}<NumericInput value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[1])} on_commit={update_inertia(1)}/></label><label>{"Z moment — 50 mm cylinder estimate (kg·m²)"}<input type="text" readonly=true value={format!("{:.5e}", configuration.moment_of_inertia_kgm2[2])}/></label></div>
                 <button onclick={start_capture} disabled={state.inertia_capture.running}>{if state.inertia_capture.running {"Capturing gyro data…"} else {"Capture 5 seconds"}}</button>
                 <button class="save-button" onclick={save_configuration}>{"Save parameters to flash"}</button>
@@ -938,6 +1045,8 @@ fn MomentOfInertia() -> Html {
 
 #[function_component]
 fn RocketOnboarding() -> Html {
+    let connection = use_context::<AppConnection>().expect("app connection context");
+    let checklist_active = connection.state.prelaunch_checklist.active;
     let page = use_state(|| 0_usize);
     let show_calibration = {
         let page = page.clone();
@@ -955,12 +1064,18 @@ fn RocketOnboarding() -> Html {
         let page = page.clone();
         Callback::from(move |_| page.set(3))
     };
+    let show_pyro = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(4))
+    };
     html! {
         <>
-            <Card title="rocket onboarding" icon="school">
-                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button><button class={if *page == 2 {"selected"} else {""}} onclick={show_orientation}>{"TVC orientation"}</button><button class={if *page == 3 {"selected"} else {""}} onclick={show_simulation}>{"Flight simulation"}</button></div>
+            <PrelaunchChecklist/>
+            if checklist_active { <GuidedOnboarding/> } else { <><Card title="rocket onboarding" icon="school">
+                <p>{"Choose a setup page."}</p>
+                <div class="axis-row"><button class={if *page == 0 {"selected"} else {""}} onclick={show_calibration}>{"Servo calibration"}</button><button class={if *page == 1 {"selected"} else {""}} onclick={show_inertia}>{"Moment of inertia"}</button><button class={if *page == 2 {"selected"} else {""}} onclick={show_orientation}>{"TVC orientation"}</button><button class={if *page == 3 {"selected"} else {""}} onclick={show_simulation}>{"Flight simulation"}</button><button class={if *page == 4 {"selected"} else {""}} onclick={show_pyro}>{"Pyro checkout"}</button></div>
             </Card>
-            if *page == 0 { <ServoCalibration/> } else if *page == 1 { <MomentOfInertia/> } else if *page == 2 { <ServoOrientationCheck/> } else { <RocketSimulation/> }
+            if *page == 0 { <ServoCalibration/> } else if *page == 1 { <MomentOfInertia/> } else if *page == 2 { <ServoOrientationCheck/> } else if *page == 3 { <RocketSimulation/> } else { <PyroConfigurationPage/> }</> }
         </>
     }
 }
@@ -1431,7 +1546,7 @@ fn RocketSimulation() -> Html {
         .join(" ");
     html! { <div class="simulation-page">
         <Card title="flight simulation" icon="rocket_launch">
-            <p>{"This is an offline model preview; it never commands hardware. Mass, inertia, and gimbal-to-COM distance come from the Moment of inertia page."}</p>
+            <p>{"Offline model. Uses saved inertia data."}</p>
             <div class="simulation-readonly"><span>{format!("Mass: {:.0} g", state.inertia_configuration.mass_g)}</span><span>{format!("COM / gimbal: {:.1} mm", state.inertia_configuration.center_of_mass_offset_mm)}</span><span>{format!("Iₓ/Iy: {:.3e} / {:.3e} kg·m²", state.inertia_configuration.moment_of_inertia_kgm2[0], state.inertia_configuration.moment_of_inertia_kgm2[1])}</span></div>
             <div class="config-grid">
                 <label>{"Motor thrust profile"}<select onchange={select_thrust_profile} value={match configuration.motor_thrust_profile { MotorThrustProfile::Constant => "constant", MotorThrustProfile::KlimaD3 => "klima-d3" }}><option value="constant">{"Constant thrust"}</option><option value="klima-d3">{"Klima D3 (manufacturer curve)"}</option></select></label>
@@ -1447,8 +1562,8 @@ fn RocketSimulation() -> Html {
                 <label>{"Initial tilt X / Y (°)"}<span class="inline-inputs"><NumericInput value={configuration.initial_tilt_degrees[0].to_string()} on_commit={update("tilt_x")}/><NumericInput value={configuration.initial_tilt_degrees[1].to_string()} on_commit={update("tilt_y")}/></span></label>
                 <label>{"PID P / I / D"}<span class="triple-inputs"><NumericInput value={configuration.pid_gains[0].to_string()} on_commit={update("p")}/><NumericInput value={configuration.pid_gains[1].to_string()} on_commit={update("i")}/><NumericInput value={configuration.pid_gains[2].to_string()} on_commit={update("d")}/></span></label>
             </div>
-            <div class="button-row"><button onclick={start}>{"Run simulation"}</button><button class="danger" disabled={state.hil_simulation.running} onclick={start_hil}>{if state.hil_simulation.running {"HIL running…"} else {"Start HIL (bench only)"}}</button><button class="save-button" onclick={save}>{"Save simulation parameters to flash"}</button></div>
-            <p class="safety-note">{"HIL moves real TVC servos. Secure the unpowered rocket, keep clear of the mechanism, and never arm pyro outputs."}</p>
+            <div class="button-row"><button onclick={start}>{"Run"}</button><button class="danger" disabled={state.hil_simulation.running} onclick={start_hil}>{if state.hil_simulation.running {"HIL running…"} else {"Start HIL"}}</button><button class="save-button" onclick={save}>{"Save"}</button></div>
+            <p class="safety-note">{"HIL moves TVC. Bench only; pyro off."}</p>
             if !hil_result.samples.is_empty() { <div class="status">{format!("Latest HIL log: {} samples · average physics loop {:.1} Hz · {} missed 1 kHz deadlines", hil_result.samples.len(), hil_average_loop_hz.unwrap_or(0.0), hil_result.missed_deadlines)}</div> }
         </Card>
         <Card title="results" icon="timeline"><div class="axis-row"><button class={if !*show_hil {"selected"} else {""}} onclick={show_simulation}>{"Simulation"}</button><button class={if *show_hil {"selected"} else {""}} disabled={hil.samples.is_empty()} onclick={show_hil_result}>{"HIL"}</button></div></Card>
@@ -1464,7 +1579,7 @@ fn RocketSimulation() -> Html {
         </Card><Card title="TVC angle over time" icon="settings_input_component">
             <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="TVC angles over time"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={tvc_reference_positive.to_string()} x2="580" y2={tvc_reference_positive.to_string()} class="reference"/><line x1="40" y1={tvc_reference_negative.to_string()} x2="580" y2={tvc_reference_negative.to_string()} class="reference"/>{if let Some(x) = cutoff_time_x { html! { <line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/> } } else { Html::default() }}<polyline points={tvc_x_path} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={tvc_y_path} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="45" y="25">{"X TVC"}</text><text x="45" y="43">{"Y TVC"}</text><text x="490" y="252">{format!("±{:.1}°", tvc_scale)}</text></svg>
             <p class="plot-legend"><span class="legend-x">{"X TVC"}</span><span class="legend-y">{"Y TVC"}</span>{" · gray: configured TVC limit · orange: motor cut-off"}</p>
-        </Card></> } else { <Card title="simulation preview" icon="play_circle"><p>{"Set the parameters, then press Run simulation to generate the plots."}</p></Card> }
+        </Card></> } else { <Card title="simulation" icon="play_circle"><p>{"Set parameters, then Run."}</p></Card> }
     </div> }
 }
 
@@ -1505,11 +1620,11 @@ fn ServoOrientationCheck() -> Html {
     html! {
         <div class="calibration-page">
             <Card title="TVC direction check" icon="screen_rotation">
-                <p class="safety-note">{"Bench use only: secure the unpowered rocket horizontally, keep clear of the TVC mechanism, and do not arm pyro outputs."}</p>
-                <p>{"Start the check, then slowly roll the rocket around its cylindrical Z axis. The nozzles should continuously point down toward the ground so the rocket would nose-dive. Stop immediately if either axis moves the wrong way."}</p>
-                <p>{"X/Y servo assignment is assumed correct. Correct a reversed axis with ‘Reverse TVC command direction’ on the Servo calibration page, then save that configuration to flash."}</p>
+                <p class="safety-note">{"Bench only. Secure rocket; pyro off."}</p>
+                <p>{"Roll around Z. Nozzles should point down. Stop on wrong motion."}</p>
+                <p>{"Fix reversal in Servo calibration, then save."}</p>
                 <div class="status">{format!("IMU: {} · commands: X {:+.2}, Y {:+.2}", if state.imu.present { "online" } else { "offline" }, calibration.orientation_check_command[0], calibration.orientation_check_command[1])}</div>
-                <button class={if calibration.orientation_check_running {"danger"} else {""}} disabled={!state.imu.present && !calibration.orientation_check_running} onclick={toggle}>{if calibration.orientation_check_running {"Stop direction check — disable servos"} else {"Start direction check"}}</button>
+                <button class={if calibration.orientation_check_running {"danger"} else {""}} disabled={!state.imu.present && !calibration.orientation_check_running} onclick={toggle}>{if calibration.orientation_check_running {"Stop check"} else {"Start check"}}</button>
             </Card>
         </div>
     }
@@ -1533,8 +1648,9 @@ fn FlightDashboard() -> Html {
     html! {
         <>
             <Card title="TVC flight computer" icon="rocket_launch">
-                <p>{"Live flight-sensor status. IMU values are refreshed in the dashboard at 4 Hz."}</p>
+                <p>{"Live status"}</p>
             </Card>
+            <PrelaunchChecklist/>
             <Card title="Battery" icon="battery_charging_full">
                 <div class={if battery.present { "battery-status" } else { "battery-status offline" }}>{if battery.present { "LIVE — MAX17048 FUEL GAUGE" } else { "OFFLINE — CHECK I²C FUEL GAUGE" }}</div>
                 <div class="battery-readings"><div><span>{"VOLTAGE"}</span><strong>{if battery.present { format!("{:.3} V", battery.voltage) } else { "—".to_owned() }}</strong></div><div><span>{"STATE OF CHARGE"}</span><strong>{if battery.present { format!("{:.0}%", battery.soc) } else { "—".to_owned() }}</strong></div></div>
@@ -1642,13 +1758,13 @@ fn WifiSettings() -> Html {
     html! {
         <Card title="Wi-Fi" icon="wifi">
             <p>{format!("Active connection: {} ({})", active.credentials.ssid, if active.connection_type == WifiConnectionType::ConnectToExternal { "network" } else { "access point" })}</p>
-            <p>{"Saved network is used on the next reboot. If it cannot be reached, the flight computer starts the LRC-wifi access point."}</p>
+            <p>{"Saved network is used after reboot; fallback is LRC-wifi."}</p>
             <div class="config-grid"><label>{"Network name (SSID)"}<input value={(*ssid).clone()} oninput={update_ssid}/></label><label>{"Password"}<input type="password" value={(*password).clone()} oninput={update_password}/></label></div>
-            <button class="save-button" onclick={save} disabled={ssid.is_empty()}>{"Save Wi-Fi settings to flash"}</button>
-            if *saved { <p>{"Saved. Reboot the flight computer to connect using the new network."}</p> }
+            <button class="save-button" onclick={save} disabled={ssid.is_empty()}>{"Save"}</button>
+            if *saved { <p>{"Saved. Reboot to connect."}</p> }
             <Card title="flight controller" icon="restart_alt">
-                <p>{"Restarts the flight controller. Saved Wi-Fi, servo, and inertia settings are retained."}</p>
-                <button class="danger" onclick={restart_flight_controller}>{if *restart_armed {"Confirm flight-controller restart"} else {"Restart flight controller"}}</button>
+                <p>{"Saved settings remain."}</p>
+                <button class="danger" onclick={restart_flight_controller}>{if *restart_armed {"Confirm restart"} else {"Restart"}}</button>
             </Card>
         </Card>
     }

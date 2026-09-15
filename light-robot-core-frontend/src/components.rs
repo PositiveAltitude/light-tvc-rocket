@@ -50,6 +50,8 @@ pub struct NumericInputProps {
     pub on_commit: Callback<f32>,
     #[prop_or_default]
     pub class: Classes,
+    #[prop_or_default]
+    pub disabled: bool,
 }
 
 #[function_component]
@@ -81,5 +83,5 @@ pub fn NumericInput(props: &NumericInputProps) -> Html {
         Callback::from(move |event: KeyboardEvent| if event.key() == "Enter" { commit.emit(()) })
     };
     let onblur = Callback::from(move |_| commit.emit(()));
-    html! { <input type="text" inputmode="decimal" class={props.class.clone()} value={(*draft).clone()} {oninput} {onblur} {onkeydown}/> }
+    html! { <input type="text" inputmode="decimal" class={props.class.clone()} value={(*draft).clone()} disabled={props.disabled} {oninput} {onblur} {onkeydown}/> }
 }

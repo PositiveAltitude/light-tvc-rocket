@@ -23,6 +23,8 @@ pub struct State {
     pub chip_id1: [u8; 6],
     pub chip_id2: [u8; 6],
     pub servo_calibration: ServoCalibrationState,
+    #[serde(default)] pub pyro_configuration: PyroConfiguration,
+    #[serde(default)] pub prelaunch_checklist: PrelaunchChecklistState,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -176,6 +178,59 @@ pub struct PyroChannelState {
 pub struct PyroState {
     pub channel1: PyroChannelState,
     pub channel2: PyroChannelState,
+}
+
+/// Configured on-time for the two deployment/ignition channels.  These values
+/// are deliberately separate from the live continuity readings.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct PyroConfiguration {
+    pub parachute_duration_ms: u16,
+    pub igniter_duration_ms: u16,
+}
+
+impl Default for PyroConfiguration {
+    fn default() -> Self {
+        Self {
+            parachute_duration_ms: 500,
+            igniter_duration_ms: 500,
+        }
+    }
+}
+
+/// Ordered, persisted pre-launch approval record. `completed_steps` is the
+/// count of consecutive steps signed off from the beginning.
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PrelaunchChecklistState {
+    pub active: bool,
+    pub completed_steps: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrelaunchChecklistStep {
+    ConfigureYServo,
+    ConfigureXServo,
+    CheckTvcDirections,
+    CheckParachuteConnection,
+    ConfigureAndTestParachute,
+    ConfigureAndCheckIgniter,
+    MeasureMomentsOfInertia,
+    RunSimulationAndSavePid,
+}
+
+impl PrelaunchChecklistStep {
+    pub const COUNT: u8 = 8;
+    pub fn index(self) -> u8 {
+        match self {
+            Self::ConfigureYServo => 0,
+            Self::ConfigureXServo => 1,
+            Self::CheckTvcDirections => 2,
+            Self::CheckParachuteConnection => 3,
+            Self::ConfigureAndTestParachute => 4,
+            Self::ConfigureAndCheckIgniter => 5,
+            Self::MeasureMomentsOfInertia => 6,
+            Self::RunSimulationAndSavePid => 7,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -380,6 +435,22 @@ pub enum Command {
         configuration: SimulationConfiguration,
     },
     StartHilSimulation { configuration: SimulationConfiguration },
+    SetPyroConfiguration {
+        configuration: PyroConfiguration,
+    },
+    /// Explicit bench-test pulse. Never connect a real igniter for channel 2.
+    TestPyro {
+        channel: u8,
+    },
+    StartPrelaunchChecklist,
+    AbortPrelaunchChecklist,
+    SignOffPrelaunchStep {
+        step: PrelaunchChecklistStep,
+    },
+    /// Clears this and every later sign-off; preceding steps remain immutable.
+    ReturnToPrelaunchStep {
+        step: PrelaunchChecklistStep,
+    },
 }
 
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize)]

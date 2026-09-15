@@ -8,6 +8,7 @@ use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::ws::FrameType;
 use esp_idf_sys::EspError;
 use include_dir::{include_dir, Dir};
+use log::info;
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -90,12 +91,15 @@ impl Server {
         let ws_sender_for_handler = ws_sender.clone();
         server.ws_handler("/ws", None, move |connection| -> Result<()> {
             if connection.is_new() {
+                info!("UI WebSocket connected");
                 // Keep the HTTPD handshake small. The background publisher
                 // sends the initial state within 50 ms after this sender is
                 // registered, avoiding JSON serialization on HTTPD's stack.
                 let sender = connection.create_detached_sender()?;
                 *ws_sender_for_handler.lock().unwrap() = Some(sender);
-            } else if !connection.is_closed() {
+            } else if connection.is_closed() {
+                info!("UI WebSocket disconnected");
+            } else {
                 let mut buffer = [0_u8; 4096];
                 let (frame_type, length) = connection.recv(&mut buffer)?;
                 if matches!(frame_type, FrameType::Text(_)) {
@@ -103,8 +107,16 @@ impl Server {
                     // its NUL terminator; serde_json requires the JSON bytes
                     // only, otherwise every socket command is rejected.
                     let json = &buffer[..length.saturating_sub(1)];
-                    if let Ok(command) = serde_json::from_slice::<Command>(json) {
-                        ws_command_handler(&command)?;
+                    match serde_json::from_slice::<Command>(json) {
+                        Ok(command) => {
+                            // A rejected command must not silently close the
+                            // UI socket. In particular, checklist safety gates
+                            // need to be diagnosable at the bench.
+                            if let Err(error) = ws_command_handler(&command) {
+                                info!("UI command rejected: {:?}", error);
+                            }
+                        }
+                        Err(error) => info!("Malformed UI command: {:?}", error),
                     }
                 }
             }
