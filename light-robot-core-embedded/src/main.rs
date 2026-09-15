@@ -1,6 +1,7 @@
 extern crate core;
 
 mod barometer;
+mod external_flash;
 mod imu;
 mod led_driver;
 mod server;
@@ -28,6 +29,8 @@ use esp_idf_hal::can::{CanDriver, Frame};
 use esp_idf_hal::cpu::Core;
 use esp_idf_hal::delay::FreeRtos;
 use esp_idf_hal::gpio::Pull;
+use esp_idf_hal::spi::{config::Config as SpiConfig, SpiDeviceDriver, SpiDriverConfig};
+use esp_idf_hal::units::*;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
@@ -601,6 +604,41 @@ fn main() -> ! {
     if let Some(default_pyro_thread_config) = default_pyro_thread_config {
         default_pyro_thread_config.set().unwrap();
     }
+
+    // Keep /WP and /HOLD high for ordinary single-SPI operation and retain
+    // every driver for the lifetime of the external NAND store.
+    let mut _flash_wp = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio14).unwrap();
+    let mut _flash_hold = esp_idf_hal::gpio::PinDriver::output(peripherals.pins.gpio9).unwrap();
+    _flash_wp.set_high().unwrap();
+    _flash_hold.set_high().unwrap();
+    let flash_spi = SpiDeviceDriver::new_single(
+        peripherals.spi2,
+        peripherals.pins.gpio12,
+        peripherals.pins.gpio11,
+        Some(peripherals.pins.gpio13),
+        Some(peripherals.pins.gpio10),
+        &SpiDriverConfig::new(),
+        &SpiConfig::new().baudrate(10_u32.MHz().into()),
+    )
+    .unwrap();
+    let mut external_flash =
+        external_flash::ArtifactStore::new(external_flash::W25N01GV::new(flash_spi));
+    let external_flash_status = external_flash
+        .reset()
+        .and_then(|_| external_flash.read_id())
+        .and_then(|id| {
+            external_flash
+                .clear_write_protection()
+                .map(|protection| (id, protection))
+        });
+    match external_flash_status {
+        Ok((id, protection)) => info!(
+            "External NAND ready: JEDEC {:02x?}, protection {:02x}",
+            id, protection
+        ),
+        Err(error) => warn!("External NAND unavailable: {:?}", error),
+    }
+    let _external_flash = external_flash;
 
     let i2c = esp_idf_hal::i2c::I2cDriver::new(
         peripherals.i2c0,
