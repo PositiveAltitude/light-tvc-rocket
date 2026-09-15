@@ -326,9 +326,13 @@ impl RocketParameters {
     }
     pub fn thrust_at(self, time_s: f32) -> f32 {
         match self.thrust_profile {
-            MotorThrustProfile::Constant => (time_s < self.burn_time_s)
-                .then_some(self.thrust_n)
-                .unwrap_or(0.0),
+            MotorThrustProfile::Constant => {
+                if time_s < self.burn_time_s {
+                    self.thrust_n
+                } else {
+                    0.0
+                }
+            }
             MotorThrustProfile::KlimaD3 => interpolate_thrust(KLIMA_D3_THRUST_CURVE, time_s),
         }
     }
@@ -537,8 +541,10 @@ mod tests {
     }
     #[test]
     fn klima_d3_profile_interpolates_manufacturer_data() {
-        let mut cfg = SimulationConfiguration::default();
-        cfg.motor_thrust_profile = MotorThrustProfile::KlimaD3;
+        let cfg = SimulationConfiguration {
+            motor_thrust_profile: MotorThrustProfile::KlimaD3,
+            ..Default::default()
+        };
         let rocket =
             RocketParameters::from_configuration(&InertiaConfiguration::default(), &cfg, 0.002);
         assert_eq!(rocket.thrust_at(0.0), 0.0);

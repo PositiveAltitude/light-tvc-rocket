@@ -56,5 +56,5 @@ jobs:
           buildtargets: esp32s3
           ldproxy: true
       - run: cargo fmt --check
-      - run: cargo clippy --target xtensa-esp32s3-espidf -- -D warnings
-      - run: cargo check --target xtensa-esp32s3-espidf --locked
+      - run: cargo clippy --release --target xtensa-esp32s3-espidf -- -D warnings
+      - run: cargo check --release --target xtensa-esp32s3-espidf --locked

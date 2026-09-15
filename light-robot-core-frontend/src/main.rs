@@ -82,12 +82,30 @@ fn device_name(device: &ServoDeviceId) -> String {
 const PRELAUNCH_STEPS: [(PrelaunchChecklistStep, &str); 8] = [
     (PrelaunchChecklistStep::ConfigureYServo, "Configure Y servo"),
     (PrelaunchChecklistStep::ConfigureXServo, "Configure X servo"),
-    (PrelaunchChecklistStep::CheckTvcDirections, "Check TVC axis directions"),
-    (PrelaunchChecklistStep::CheckParachuteConnection, "Check parachute on PYR1 only"),
-    (PrelaunchChecklistStep::ConfigureAndTestParachute, "Configure and test parachute activation"),
-    (PrelaunchChecklistStep::ConfigureAndCheckIgniter, "Configure igniter timing and conductivity"),
-    (PrelaunchChecklistStep::MeasureMomentsOfInertia, "Measure moments of inertia"),
-    (PrelaunchChecklistStep::RunSimulationAndSavePid, "Run simulation/HIL and save PID"),
+    (
+        PrelaunchChecklistStep::CheckTvcDirections,
+        "Check TVC axis directions",
+    ),
+    (
+        PrelaunchChecklistStep::CheckParachuteConnection,
+        "Check parachute on PYR1 only",
+    ),
+    (
+        PrelaunchChecklistStep::ConfigureAndTestParachute,
+        "Configure and test parachute activation",
+    ),
+    (
+        PrelaunchChecklistStep::ConfigureAndCheckIgniter,
+        "Configure igniter timing and conductivity",
+    ),
+    (
+        PrelaunchChecklistStep::MeasureMomentsOfInertia,
+        "Measure moments of inertia",
+    ),
+    (
+        PrelaunchChecklistStep::RunSimulationAndSavePid,
+        "Run simulation/HIL and save PID",
+    ),
 ];
 
 #[function_component]
@@ -95,8 +113,14 @@ fn PrelaunchChecklist() -> Html {
     let connection = use_context::<AppConnection>().expect("app connection context");
     let checklist = connection.state.prelaunch_checklist.clone();
     let socket = connection.send_command.clone();
-    let start = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::StartPrelaunchChecklist)) };
-    let abort = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::AbortPrelaunchChecklist)) };
+    let start = {
+        let socket = socket.clone();
+        Callback::from(move |_| send_command(&socket, Command::StartPrelaunchChecklist))
+    };
+    let abort = {
+        let socket = socket.clone();
+        Callback::from(move |_| send_command(&socket, Command::AbortPrelaunchChecklist))
+    };
     html! { <Card title="pre-launch checklist" icon="fact_check">
         if !checklist.active {
             <p>{"Saved sign-offs lock completed settings."}</p>
@@ -127,14 +151,46 @@ fn PrelaunchChecklist() -> Html {
 
 fn guided_step_copy(step: u8) -> (&'static str, &'static str, PrelaunchChecklistStep) {
     match step {
-        0 => ("Configure Y servo", "Set up the Y axis.", PrelaunchChecklistStep::ConfigureYServo),
-        1 => ("Configure X servo", "Set up the X axis.", PrelaunchChecklistStep::ConfigureXServo),
-        2 => ("Check TVC directions", "Verify both axes move correctly.", PrelaunchChecklistStep::CheckTvcDirections),
-        3 => ("Check parachute connection", "PYR1: continuity. PYR2: open.", PrelaunchChecklistStep::CheckParachuteConnection),
-        4 => ("Test parachute", "Set duration; test PYR1.", PrelaunchChecklistStep::ConfigureAndTestParachute),
-        5 => ("Configure igniter", "Set duration; test PYR2 with wire only.", PrelaunchChecklistStep::ConfigureAndCheckIgniter),
-        6 => ("Measure inertia", "Capture and save inertia.", PrelaunchChecklistStep::MeasureMomentsOfInertia),
-        _ => ("Simulation and PID", "Run simulation or HIL; save PID.", PrelaunchChecklistStep::RunSimulationAndSavePid),
+        0 => (
+            "Configure Y servo",
+            "Set up the Y axis.",
+            PrelaunchChecklistStep::ConfigureYServo,
+        ),
+        1 => (
+            "Configure X servo",
+            "Set up the X axis.",
+            PrelaunchChecklistStep::ConfigureXServo,
+        ),
+        2 => (
+            "Check TVC directions",
+            "Verify both axes move correctly.",
+            PrelaunchChecklistStep::CheckTvcDirections,
+        ),
+        3 => (
+            "Check parachute connection",
+            "PYR1: continuity. PYR2: open.",
+            PrelaunchChecklistStep::CheckParachuteConnection,
+        ),
+        4 => (
+            "Test parachute",
+            "Set duration; test PYR1.",
+            PrelaunchChecklistStep::ConfigureAndTestParachute,
+        ),
+        5 => (
+            "Configure igniter",
+            "Set duration; test PYR2 with wire only.",
+            PrelaunchChecklistStep::ConfigureAndCheckIgniter,
+        ),
+        6 => (
+            "Measure inertia",
+            "Capture and save inertia.",
+            PrelaunchChecklistStep::MeasureMomentsOfInertia,
+        ),
+        _ => (
+            "Simulation and PID",
+            "Run simulation or HIL; save PID.",
+            PrelaunchChecklistStep::RunSimulationAndSavePid,
+        ),
     }
 }
 
@@ -147,7 +203,8 @@ fn GuidedOnboarding() -> Html {
     }
     let (title, instruction, step) = guided_step_copy(completed);
     let socket = connection.send_command.clone();
-    let sign = Callback::from(move |_| send_command(&socket, Command::SignOffPrelaunchStep { step }));
+    let sign =
+        Callback::from(move |_| send_command(&socket, Command::SignOffPrelaunchStep { step }));
     html! { <>
         <Card title={format!("Step {} of {} — {}", completed + 1, PrelaunchChecklistStep::COUNT, title)} icon="directions_run">
             <p>{instruction}</p>
@@ -167,17 +224,63 @@ fn PyroConfigurationPage() -> Html {
     let state = connection.state.clone();
     let socket = connection.send_command.clone();
     let configuration = use_state_eq(|| state.pyro_configuration.clone());
+    let configuration_loaded = use_state(|| false);
+    {
+        let configuration = configuration.clone();
+        let configuration_loaded = configuration_loaded.clone();
+        use_effect_with_deps(
+            move |message| {
+                if let Some(message) = &**message {
+                    if let Ok(SocketMessage::State(state)) =
+                        serde_json::from_str::<SocketMessage>(message)
+                    {
+                        if !*configuration_loaded {
+                            configuration.set(state.pyro_configuration);
+                            configuration_loaded.set(true);
+                        }
+                    }
+                }
+                || ()
+            },
+            connection.message.clone(),
+        );
+    }
     let parachute_locked = state.prelaunch_checklist.completed_steps > 4;
     let igniter_locked = state.prelaunch_checklist.completed_steps > 5;
-    let pyro2_test_allowed = state.prelaunch_checklist.active && state.prelaunch_checklist.completed_steps == 5;
-    let update = |channel: u8| { let configuration = configuration.clone(); Callback::from(move |value: f32| {
-        let mut next = (*configuration).clone();
-        if channel == 1 { next.parachute_duration_ms = value.round().clamp(1.0, 10_000.0) as u16; } else { next.igniter_duration_ms = value.round().clamp(1.0, 10_000.0) as u16; }
-        configuration.set(next);
-    })};
-    let save = { let socket = socket.clone(); let configuration = configuration.clone(); Callback::from(move |_| send_command(&socket, Command::SetPyroConfiguration { configuration: (*configuration).clone() })) };
-    let test1 = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 1 })) };
-    let test2 = { let socket = socket.clone(); Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 2 })) };
+    let pyro2_test_allowed =
+        state.prelaunch_checklist.active && state.prelaunch_checklist.completed_steps == 5;
+    let update = |channel: u8| {
+        let configuration = configuration.clone();
+        Callback::from(move |value: f32| {
+            let mut next = (*configuration).clone();
+            if channel == 1 {
+                next.parachute_duration_ms = value.round().clamp(1.0, 10_000.0) as u16;
+            } else {
+                next.igniter_duration_ms = value.round().clamp(1.0, 10_000.0) as u16;
+            }
+            configuration.set(next);
+        })
+    };
+    let save = {
+        let socket = socket.clone();
+        let configuration = configuration.clone();
+        Callback::from(move |_| {
+            send_command(
+                &socket,
+                Command::SetPyroConfiguration {
+                    configuration: (*configuration).clone(),
+                },
+            )
+        })
+    };
+    let test1 = {
+        let socket = socket.clone();
+        Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 1 }))
+    };
+    let test2 = {
+        let socket = socket.clone();
+        Callback::from(move |_| send_command(&socket, Command::TestPyro { channel: 2 }))
+    };
     html! { <div class="calibration-page"><Card title="pyro checkout" icon="electrical_services">
         <p class="safety-note">{"PYR1: parachute test load only. PYR2: wire short only; never an igniter."}</p>
         <div class="status">{format!("PYR1: {}{} · PYR2: {}{}", if state.pyro.channel1.continuity {"CONTINUITY"} else {"OPEN"}, if state.pyro.channel1.fire {" · FIRING"} else {""}, if state.pyro.channel2.continuity {"CONTINUITY"} else {"OPEN"}, if state.pyro.channel2.fire {" · FIRING"} else {""})}</div>
@@ -201,7 +304,30 @@ fn ServoCalibration() -> Html {
     let configuration_loaded = use_state(|| false);
     let socket = connection.send_command.clone();
     {
-        let state = state.clone();
+        let socket = socket.clone();
+        use_effect_with_deps(
+            move |_| {
+                move || {
+                    send_command(
+                        &socket,
+                        Command::SetServoEnabled {
+                            axis: ServoAxis::X,
+                            enabled: false,
+                        },
+                    );
+                    send_command(
+                        &socket,
+                        Command::SetServoEnabled {
+                            axis: ServoAxis::Y,
+                            enabled: false,
+                        },
+                    );
+                }
+            },
+            (),
+        );
+    }
+    {
         let tests = tests.clone();
         let testing = testing.clone();
         let config = config.clone();
@@ -221,7 +347,6 @@ fn ServoCalibration() -> Html {
                             enabled.set(new_state.servo_calibration.x_enabled);
                             configuration_loaded.set(true);
                         }
-                        state.set(new_state);
                     }
                     if let Ok(SocketMessage::TestResult(result)) =
                         serde_json::from_str::<SocketMessage>(message)
@@ -248,7 +373,17 @@ fn ServoCalibration() -> Html {
         let draft = draft.clone();
         let enabled = enabled.clone();
         let state = state.clone();
+        let socket = socket.clone();
         Callback::from(move |_| {
+            if *axis != new_axis {
+                send_command(
+                    &socket,
+                    Command::SetServoEnabled {
+                        axis: *axis,
+                        enabled: false,
+                    },
+                );
+            }
             axis.set(new_axis);
             let next_config = if new_axis == ServoAxis::X {
                 state.servo_calibration.x.clone()
@@ -379,6 +514,7 @@ fn ServoCalibration() -> Html {
     let toggle = {
         let axis = axis.clone();
         let enabled = enabled.clone();
+        let manual_position = manual_position.clone();
         let socket = socket.clone();
         Callback::from(move |_| {
             let on = !*enabled;
@@ -390,6 +526,15 @@ fn ServoCalibration() -> Html {
                     enabled: on,
                 },
             );
+            if on {
+                send_command(
+                    &socket,
+                    Command::SetServoPosition {
+                        axis: *axis,
+                        position: *manual_position,
+                    },
+                );
+            }
         })
     };
     let manual = {
@@ -829,7 +974,6 @@ fn MomentOfInertia() -> Html {
     let published_fit_iteration = use_state(|| None::<u32>);
     let socket = connection.send_command.clone();
     {
-        let state = state.clone();
         let result = result.clone();
         let configuration = configuration.clone();
         let configuration_loaded = configuration_loaded.clone();
@@ -847,7 +991,6 @@ fn MomentOfInertia() -> Html {
                             configuration.set(loaded);
                             configuration_loaded.set(true);
                         }
-                        state.set(next_state);
                     }
                     if let Ok(SocketMessage::InertiaCaptureResult(next_result)) =
                         serde_json::from_str::<SocketMessage>(message)
@@ -1114,29 +1257,6 @@ fn run_rocket_preview(
     NumericalSimulation.run(environment, rocket, initial, &mut controller, true)
 }
 
-fn plot_series(
-    trajectory: &[SimulationLog],
-    magnitude: f32,
-    value: impl Fn(&SimulationLog) -> f32,
-) -> String {
-    let duration = trajectory
-        .last()
-        .map(|point| point.time)
-        .unwrap_or(1.0)
-        .max(0.001);
-    trajectory
-        .iter()
-        .map(|point| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + point.time / duration * 540.0,
-                130.0 - value(point) / magnitude * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Renderer-neutral data consumed by the shared simulation/HIL plot view.
 #[derive(Clone, PartialEq)]
 struct PlotSample {
@@ -1246,7 +1366,6 @@ fn RocketSimulation() -> Html {
     let loaded = use_state(|| false);
     let socket = connection.send_command.clone();
     {
-        let state = state.clone();
         let configuration = configuration.clone();
         let loaded = loaded.clone();
         let hil_result = hil_result.clone();
@@ -1260,7 +1379,6 @@ fn RocketSimulation() -> Html {
                             configuration.set(next.simulation_configuration.clone());
                             loaded.set(true);
                         }
-                        state.set(next);
                     }
                     if let Ok(SocketMessage::HilSimulationChunk(chunk)) =
                         serde_json::from_str::<SocketMessage>(message)
@@ -1365,74 +1483,9 @@ fn RocketSimulation() -> Html {
         Callback::from(move |_| show_hil.set(true))
     };
     let trajectory = &*trajectory;
-    let trajectory_scale = trajectory.iter().fold(1.0_f32, |scale, point| {
-        scale
-            .max(point.position.x.abs())
-            .max(point.position.z.abs())
-    });
-    let trajectory_path = trajectory
-        .iter()
-        .map(|point| {
-            format!(
-                "{:.1},{:.1}",
-                300.0 + point.position.x / trajectory_scale * 210.0,
-                235.0 - point.position.z / trajectory_scale * 210.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
     let burn_duration =
         RocketParameters::from_configuration(&state.inertia_configuration, &configuration, 0.002)
             .burn_duration_s();
-    let cutoff = trajectory
-        .iter()
-        .find(|point| point.time >= burn_duration)
-        .copied();
-    let cutoff_trajectory = cutoff.map(|point| {
-        format!(
-            "{:.1},{:.1}",
-            300.0 + point.position.x / trajectory_scale * 210.0,
-            235.0 - point.position.z / trajectory_scale * 210.0
-        )
-    });
-    let duration = trajectory
-        .last()
-        .map(|point| point.time)
-        .unwrap_or(1.0)
-        .max(0.001);
-    let cutoff_time_x = cutoff.map(|point| 40.0 + point.time / duration * 540.0);
-    let tilt = |point: &SimulationLog| {
-        let up = point.rotation.rotate(Vec3::UP);
-        [
-            (-up.y).atan2(up.z).to_degrees(),
-            up.x.atan2(up.z).to_degrees(),
-        ]
-    };
-    let tilt_scale = trajectory.iter().fold(10.0_f32, |scale, point| {
-        let value = tilt(point);
-        scale.max(value[0].abs()).max(value[1].abs())
-    });
-    let tvc_scale = trajectory.iter().fold(
-        configuration.max_tvc_angle_degrees.max(1.0),
-        |scale, point| {
-            scale
-                .max((point.tvc[0] * configuration.max_tvc_angle_degrees).abs())
-                .max((point.tvc[1] * configuration.max_tvc_angle_degrees).abs())
-        },
-    );
-    let tilt_reference_positive = 130.0 - 5.0 / tilt_scale * 105.0;
-    let tilt_reference_negative = 130.0 + 5.0 / tilt_scale * 105.0;
-    let tvc_reference_positive = 130.0 - configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
-    let tvc_reference_negative = 130.0 + configuration.max_tvc_angle_degrees / tvc_scale * 105.0;
-    let tilt_x_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[0]);
-    let tilt_y_path = plot_series(trajectory, tilt_scale, |point| tilt(point)[1]);
-    let tvc_x_path = plot_series(trajectory, tvc_scale, |point| {
-        point.tvc[0] * configuration.max_tvc_angle_degrees
-    });
-    let tvc_y_path = plot_series(trajectory, tvc_scale, |point| {
-        point.tvc[1] * configuration.max_tvc_angle_degrees
-    });
-    let final_point = trajectory.last().copied();
     let hil = &*hil_result;
     let hil_average_loop_hz =
         hil.samples
@@ -1445,105 +1498,6 @@ fn RocketSimulation() -> Html {
                         / (elapsed_us as f32 / 1_000_000.0)
                 })
             });
-    let hil_duration = hil
-        .samples
-        .last()
-        .map(|sample| sample.scheduled_time_us.max(1) as f32)
-        .unwrap_or(1.0);
-    let hil_scale = hil.samples.iter().fold(1.0_f32, |scale, sample| {
-        scale
-            .max(sample.position_m[0].abs())
-            .max(sample.position_m[2].abs())
-    });
-    let hil_trajectory = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                300.0 + sample.position_m[0] / hil_scale * 210.0,
-                235.0 - sample.position_m[2] / hil_scale * 210.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_tilt_scale = hil.samples.iter().fold(5.0_f32, |scale, sample| {
-        scale
-            .max(sample.orientation_xy_degrees[0].abs())
-            .max(sample.orientation_xy_degrees[1].abs())
-    });
-    let hil_tilt_x = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.orientation_xy_degrees[0] / hil_tilt_scale * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_tilt_y = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.orientation_xy_degrees[1] / hil_tilt_scale * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_tvc = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.tvc_command[0] * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_actual = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.tvc_actual[0] * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_tvc_y = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.tvc_command[1] * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let hil_actual_y = hil
-        .samples
-        .iter()
-        .map(|sample| {
-            format!(
-                "{:.1},{:.1}",
-                40.0 + sample.scheduled_time_us as f32 / hil_duration * 540.0,
-                130.0 - sample.tvc_actual[1] * 105.0
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
     html! { <div class="simulation-page">
         <Card title="flight simulation" icon="rocket_launch">
             <p>{"Offline model. Uses saved inertia data."}</p>
@@ -1568,18 +1522,6 @@ fn RocketSimulation() -> Html {
         </Card>
         <Card title="results" icon="timeline"><div class="axis-row"><button class={if !*show_hil {"selected"} else {""}} onclick={show_simulation}>{"Simulation"}</button><button class={if *show_hil {"selected"} else {""}} disabled={hil.samples.is_empty()} onclick={show_hil_result}>{"HIL"}</button></div></Card>
         if *show_hil { <SimulationResultsView title="HIL" samples={hil_plot_samples(&hil.samples)} cutoff_s={Some(burn_duration)} average_hz={hil_average_loop_hz}/> } else { <SimulationResultsView title="Simulation" samples={simulation_plot_samples(trajectory)} cutoff_s={Some(burn_duration)}/> }
-        if false && !hil.samples.is_empty() { <></> }
-        if false && !trajectory.is_empty() { <><Card title="predicted trajectory" icon="timeline">
-            <p class="plot-legend">{"X (lateral) and Z (height) use the same metres-per-pixel scale. Orange marks motor cut-off."}</p>
-            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="Predicted rocket trajectory"><line x1="30" y1="235" x2="580" y2="235" class="axis"/><line x1="300" y1="15" x2="300" y2="235" class="grid"/><polyline points={trajectory_path} fill="none" stroke="#1565c0" stroke-width="3"/>{if let Some(point) = cutoff_trajectory { html! { <circle cx={point.split(',').next().unwrap_or("0").to_owned()} cy={point.split(',').nth(1).unwrap_or("0").to_owned()} r="5" fill="#ef6c00"/> } } else { Html::default() }}<text x="38" y="225">{"launch"}</text><text x="485" y="252">{format!("±{:.1} m", trajectory_scale)}</text></svg>
-            if let Some(point) = final_point { <div class="inertia-summary"><span>{"Simulated duration"}</span><strong>{format!("{:.2} s", point.time)}</strong><span>{"Final height"}</span><strong>{format!("{:.2} m", point.position.z)}</strong><span>{"Final lateral displacement"}</span><strong>{format!("{:.2} m", point.position.x)}</strong></div> }
-        </Card><Card title="tilt over time" icon="show_chart">
-            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="Rocket tilt over time"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={tilt_reference_positive.to_string()} x2="580" y2={tilt_reference_positive.to_string()} class="reference"/><line x1="40" y1={tilt_reference_negative.to_string()} x2="580" y2={tilt_reference_negative.to_string()} class="reference"/>{if let Some(x) = cutoff_time_x { html! { <line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/> } } else { Html::default() }}<polyline points={tilt_x_path} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={tilt_y_path} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="45" y="25">{"X tilt"}</text><text x="45" y="43">{"Y tilt"}</text><text x="490" y="252">{format!("±{:.1}°", tilt_scale)}</text></svg>
-            <p class="plot-legend"><span class="legend-x">{"X tilt"}</span><span class="legend-y">{"Y tilt"}</span>{" · gray: typical ±5° · orange: motor cut-off"}</p>
-        </Card><Card title="TVC angle over time" icon="settings_input_component">
-            <svg class="simulation-plot" viewBox="0 0 600 260" aria-label="TVC angles over time"><line x1="40" y1="130" x2="580" y2="130" class="axis"/><line x1="40" y1={tvc_reference_positive.to_string()} x2="580" y2={tvc_reference_positive.to_string()} class="reference"/><line x1="40" y1={tvc_reference_negative.to_string()} x2="580" y2={tvc_reference_negative.to_string()} class="reference"/>{if let Some(x) = cutoff_time_x { html! { <line x1={x.to_string()} y1="15" x2={x.to_string()} y2="235" class="cutoff"/> } } else { Html::default() }}<polyline points={tvc_x_path} fill="none" stroke="#1565c0" stroke-width="2"/><polyline points={tvc_y_path} fill="none" stroke="#d32f2f" stroke-width="2"/><text x="45" y="25">{"X TVC"}</text><text x="45" y="43">{"Y TVC"}</text><text x="490" y="252">{format!("±{:.1}°", tvc_scale)}</text></svg>
-            <p class="plot-legend"><span class="legend-x">{"X TVC"}</span><span class="legend-y">{"Y TVC"}</span>{" · gray: configured TVC limit · orange: motor cut-off"}</p>
-        </Card></> } else { <Card title="simulation" icon="play_circle"><p>{"Set parameters, then Run."}</p></Card> }
     </div> }
 }
 
@@ -1589,19 +1531,17 @@ fn ServoOrientationCheck() -> Html {
     let state = connection.state.clone();
     let socket = connection.send_command.clone();
     {
-        let state = state.clone();
+        let socket = socket.clone();
         use_effect_with_deps(
-            move |message| {
-                if let Some(message) = &**message {
-                    if let Ok(SocketMessage::State(next)) =
-                        serde_json::from_str::<SocketMessage>(message)
-                    {
-                        state.set(next);
-                    }
+            move |_| {
+                move || {
+                    send_command(
+                        &socket,
+                        Command::SetServoOrientationCheck { running: false },
+                    )
                 }
-                || ()
             },
-            connection.message.clone(),
+            (),
         );
     }
     let toggle = {
@@ -1690,7 +1630,6 @@ fn WifiSettings() -> Html {
     let restart_armed = use_state(|| false);
     let socket = connection.send_command.clone();
     {
-        let state = state.clone();
         let ssid = ssid.clone();
         use_effect_with_deps(
             move |message| {
@@ -1701,7 +1640,6 @@ fn WifiSettings() -> Html {
                         if ssid.is_empty() && !next.configured_wifi_ssid.is_empty() {
                             ssid.set(next.configured_wifi_ssid.clone());
                         }
-                        state.set(next);
                     }
                 }
                 || ()

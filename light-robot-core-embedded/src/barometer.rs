@@ -15,13 +15,27 @@ const REG_PRESSURE: u8 = 0xf7;
 /// single-sample pressure noise visible on a stationary vehicle.
 const LOW_PASS_ALPHA: f32 = 0.269_597;
 
-#[derive(Debug)]
 pub enum BarometerError {
     IdentityRead,
     UnexpectedIdentity(u8),
     CalibrationRead,
     Configuration,
     DataRead,
+}
+
+impl core::fmt::Debug for BarometerError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::IdentityRead => formatter.write_str("IdentityRead"),
+            Self::UnexpectedIdentity(identity) => formatter
+                .debug_tuple("UnexpectedIdentity")
+                .field(identity)
+                .finish(),
+            Self::CalibrationRead => formatter.write_str("CalibrationRead"),
+            Self::Configuration => formatter.write_str("Configuration"),
+            Self::DataRead => formatter.write_str("DataRead"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -152,7 +166,7 @@ fn compensate_temperature(raw: i32, c: Calibration) -> (f32, i32) {
     let var2 =
         (((((raw >> 4) - c.t1 as i32) * ((raw >> 4) - c.t1 as i32)) >> 12) * c.t3 as i32) >> 14;
     let fine = var1 + var2;
-    ((fine * 5 + 128 >> 8) as f32 / 100.0, fine)
+    ((((fine * 5 + 128) >> 8) as f32 / 100.0), fine)
 }
 
 fn compensate_pressure(raw: i32, fine: i32, c: Calibration) -> Option<f32> {

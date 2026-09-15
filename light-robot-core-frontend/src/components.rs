@@ -2,19 +2,6 @@ use material_yew::*;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
-pub struct ChildrenProps { pub children: Children }
-
-#[function_component]
-pub fn HorizontalLayout(props: &ChildrenProps) -> Html {
-    html! { <div class="horizontal-layout">{props.children.clone()}</div> }
-}
-
-#[function_component]
-pub fn VerticalLayout(props: &ChildrenProps) -> Html {
-    html! { <div class="vertical-layout">{props.children.clone()}</div> }
-}
-
-#[derive(Properties, PartialEq)]
 pub struct CardProps {
     pub children: Children,
     pub title: String,
@@ -31,7 +18,11 @@ pub fn Card(props: &CardProps) -> Html {
 }
 
 #[derive(Properties, PartialEq)]
-pub struct TabPageProps { pub children: Children, pub id: usize, pub current_id: usize }
+pub struct TabPageProps {
+    pub children: Children,
+    pub id: usize,
+    pub current_id: usize,
+}
 
 #[function_component]
 pub fn TabPage(props: &TabPageProps) -> Html {
@@ -60,10 +51,13 @@ pub fn NumericInput(props: &NumericInputProps) -> Html {
     {
         let draft = draft.clone();
         let value = props.value.clone();
-        use_effect_with_deps(move |value| {
-            draft.set(value.clone());
-            || ()
-        }, value);
+        use_effect_with_deps(
+            move |value| {
+                draft.set(value.clone());
+                || ()
+            },
+            value,
+        );
     }
     let commit = {
         let draft = draft.clone();
@@ -76,11 +70,21 @@ pub fn NumericInput(props: &NumericInputProps) -> Html {
     };
     let oninput = {
         let draft = draft.clone();
-        Callback::from(move |event: InputEvent| draft.set(event.target_unchecked_into::<web_sys::HtmlInputElement>().value()))
+        Callback::from(move |event: InputEvent| {
+            draft.set(
+                event
+                    .target_unchecked_into::<web_sys::HtmlInputElement>()
+                    .value(),
+            )
+        })
     };
     let onkeydown = {
         let commit = commit.clone();
-        Callback::from(move |event: KeyboardEvent| if event.key() == "Enter" { commit.emit(()) })
+        Callback::from(move |event: KeyboardEvent| {
+            if event.key() == "Enter" {
+                commit.emit(())
+            }
+        })
     };
     let onblur = Callback::from(move |_| commit.emit(()));
     html! { <input type="text" inputmode="decimal" class={props.class.clone()} value={(*draft).clone()} disabled={props.disabled} {oninput} {onblur} {onkeydown}/> }

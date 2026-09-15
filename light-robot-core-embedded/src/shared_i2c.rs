@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 
 /// Cloneable, transaction-serialized access to the board's shared I²C bus.
 ///
-/// The MAX17048 fuel gauge and BMI270 IMU are both fitted to I2C0, so each
-/// device receives its own handle while the driver itself remains owned here.
+/// The MAX17048 fuel gauge, ICM-42688-P IMU, and BMP280 barometer share I2C0.
+/// Each high-level driver receives a handle while every bus transaction stays
+/// atomic, so no device can interleave bytes with another device.
 #[derive(Clone)]
 pub struct SharedI2c {
     inner: Arc<Mutex<I2cDriver<'static>>>,
